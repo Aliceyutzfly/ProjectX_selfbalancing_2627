@@ -1,0 +1,43 @@
+{
+  "libraries": {
+    "WebSockets": "2.7.3",
+    "PID": "1.2.1",
+    "I2Cdevlib-Core": "1.0.1",
+    "I2Cdevlib-MPU6050": "1.0.0"
+  },
+  "core_libraries": [
+    "WiFi",
+    "WiFiClientSecure",
+    "WebServer",
+    "Preferences",
+    "Wire"
+  ],
+  "changes": "Third-party relative includes only. Application is in Robot_ArduinoIDE.ino and Balance.ino; enum mode names adjusted to avoid the PID MANUAL macro when Arduino combines tabs; explicit function declarations preserve sketch preprocessing.",
+  "include_adjustments": [
+    {
+      "file": "Balance.ino",
+      "include": "PID_v1.h",
+      "relative": "src/lib/PID/PID_v1.h"
+    },
+    {
+      "file": "Balance.ino",
+      "include": "I2Cdev.h",
+      "relative": "src/lib/I2Cdevlib-Core/I2Cdev.h"
+    },
+    {
+      "file": "Balance.ino",
+      "include": "MPU6050_6Axis_MotionApps20.h",
+      "relative": "src/lib/I2Cdevlib-MPU6050/MPU6050_6Axis_MotionApps20.h"
+    },
+    {
+      "file": "Robot_ArduinoIDE.ino",
+      "include": "WebSocketsServer.h",
+      "relative": "src/lib/WebSockets/WebSocketsServer.h"
+    },
+    {
+      "file": "src\\lib\\I2Cdevlib-MPU6050\\MPU6050.h",
+      "include": "I2Cdev.h",
+      "relative": "../I2Cdevlib-Core/I2Cdev.h"
+    }
+  ]
+}
