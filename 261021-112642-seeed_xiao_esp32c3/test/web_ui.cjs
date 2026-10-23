@@ -6,6 +6,10 @@ const vm = require('node:vm');
 const assert = require('node:assert/strict');
 const header = fs.readFileSync(path.join(__dirname, '../include/web_page.h'), 'utf8');
 const html = header.split('R"HTML(')[1].split(')HTML"')[0];
+const statusArea=html.match(/<section class="robot-status"[\s\S]*?<\/section>/)[0];
+assert(statusArea.includes('%ROBOT_SSID%') && statusArea.includes('id="angles"'));
+assert(!html.includes('Both modes start'),'remove the long movement explanation');
+assert(html.includes('min-height:104px'),'larger directional buttons');
 assert(!/<(?:script|link|img)\b[^>]*(?:src|href)=['"]https?:\/\//i.test(html), 'UI must not fetch external assets');
 const script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
 class Target {
@@ -15,7 +19,7 @@ class Target {
   setPointerCapture() {}
   fire(name, values = {}) { for (const fn of this.events[name] || []) fn({preventDefault() {}, ...values}); }
 }
-const elements = Object.fromEntries(['forward','backward','left','right','manual','distanceMode','motorOff','stop','connection','activity','distance','modeLabel'].map(id => [id, new Target()]));
+const elements = Object.fromEntries(['forward','backward','left','right','manual','distanceMode','motorOff','stop','connection','activity','distance','modeLabel','angles','balanceInfo','calibrationMode','calibrationPanel','uprightValue','captureUpright','saveUpright','calibrationMessage'].map(id => [id, new Target()]));
 const commands = {forward:'forward',backward:'backward',left:'turnLeft',right:'turnRight'};
 const buttons = Object.keys(commands).map(id => { elements[id].dataset.command = commands[id]; return elements[id]; });
 const document = new Target(), window = new Target();
@@ -64,7 +68,7 @@ document.fire('keydown',{key:'w',code:'KeyW',repeat:false}); assert.equal(last()
 document.fire('keyup',{key:'w',code:'KeyW'}); assert.equal(last(),'stop');
 pointer(elements.backward,'pointerdown'); window.fire('blur'); assert.equal(last(),'stop');
 elements.distanceMode.fire('click'); assert.equal(last(),'mode:distance');
-state('DISTANCE'); assert.equal(elements.forward.disabled,true);
+state('DISTANCE'); assert.equal(elements.forward.disabled,true);assert.match(elements.modeLabel.textContent,/No echo keeps moving/);
 const count = socket.sent.length;
 document.fire('keydown',{key:'ArrowUp',code:'ArrowUp',repeat:false});
 assert.equal(socket.sent.length,count,'keyboard must not drive in distance mode');
@@ -90,6 +94,37 @@ assert.equal(elements.forward.disabled,true);
 assert.equal(elements.motorOff.disabled,false);
 elements.motorOff.fire('click');
 assert.equal(reconnect.sent.at(-1),'motors:off');
-assert(!/balance|disarm|tilt/i.test(html),'removed mode and telemetry must not remain in the page');
+assert(!html.includes('id="balanceMode"'),'still only two driving modes');
+reconnect.onmessage({data:JSON.stringify({mode:'MANUAL',distance_cm:42,activity:'Forward',angle_deg:179,target_deg:178,tilt_deg:1,balance_active:false,balance_pwm:0,balance_message:'Balance off'})});
+assert.match(elements.angles.textContent,/Angle: 179.0 deg.*Target: 178.0 deg/);
+assert.equal(elements.forward.disabled,false);
+reconnect.onmessage({data:JSON.stringify({mode:'DISTANCE',distance_cm:10,activity:'Turn left',angle_deg:177,target_deg:178,tilt_deg:-1,balance_active:false})});
+assert.match(elements.angles.textContent,/Angle: 177.0 deg.*Target: 178.0 deg/);
+reconnect.onmessage({data:JSON.stringify({mode:'MANUAL',distance_cm:null,activity:'Balancing on STOP',angle_deg:178,target_deg:178,tilt_deg:0,balance_active:true,balance_pwm:20,balance_message:'Balancing on STOP'})});
+assert.match(elements.angles.textContent,/Angle: 178.0 deg.*Target: 178.0 deg/);
+assert.match(elements.balanceInfo.textContent,/Balancing upright/);
+assert.equal(elements.forward.disabled,false,'balancing while stopped must not lock arrows');
+assert.equal(elements.left.disabled,false);
+assert.equal(elements.distance.textContent,'Ultrasonic paused');
+reconnect.onmessage({data:JSON.stringify({mode:'MANUAL',distance_cm:null,activity:'Stopped',angle_deg:null,target_deg:178,tilt_deg:null,balance_active:false,balance_pending:true,balance_message:'IMU timeout'})});
+assert.match(elements.angles.textContent,/Angle: -- deg.*Target: 178.0 deg/);
+elements.calibrationMode.fire('click');assert.equal(reconnect.sent.at(-1),'mode:calibration');
+reconnect.onmessage({data:JSON.stringify({mode:'CALIBRATION',distance_cm:10,activity:'Stopped',angle_deg:181.25,target_deg:178,tilt_deg:3.25,balance_active:false,balance_ready:true,calibration_message:'Hold upright'})});
+assert.equal(elements.forward.disabled,true);assert.equal(elements.left.disabled,true);
+assert.equal(elements.calibrationPanel.hidden,false);assert.equal(elements.captureUpright.disabled,false);
+assert.equal(elements.uprightValue.value,'178.00');
+elements.captureUpright.fire('click');assert.equal(elements.uprightValue.value,'181.25');
+elements.saveUpright.fire('click');assert.equal(reconnect.sent.at(-1),'imu:save:181.25');
+const savedCount=reconnect.sent.length;
+elements.uprightValue.value='NaN';elements.saveUpright.fire('click');assert.equal(reconnect.sent.length,savedCount);
+elements.uprightValue.value='';elements.saveUpright.fire('click');assert.equal(reconnect.sent.length,savedCount);
+elements.uprightValue.value='178.75';
+reconnect.onmessage({data:JSON.stringify({mode:'CALIBRATION',distance_cm:10,activity:'Stopped',angle_deg:181.3,target_deg:178,tilt_deg:3.3,balance_ready:true})});
+assert.equal(elements.uprightValue.value,'178.75','telemetry must not overwrite an edited value');
+const keyboardCount=reconnect.sent.length;document.fire('keydown',{key:'w',code:'KeyW',repeat:false});assert.equal(reconnect.sent.length,keyboardCount);
+reconnect.onmessage({data:JSON.stringify({mode:'CALIBRATION',distance_cm:10,activity:'Stopped',angle_deg:181.25,target_deg:181.25,tilt_deg:0,balance_ready:true,calibration_message:'Upright angle saved'})});
+assert.match(elements.angles.textContent,/Target: 181.3 deg/);assert.match(elements.calibrationMessage.textContent,/saved/);
+reconnect.close();assert.match(elements.angles.textContent,/disconnected/);
+assert.equal(elements.saveUpright.disabled,true);assert.equal(elements.captureUpright.disabled,true);
 module.exports = 'PASS: two-mode controls, motor-off, held commands, release, keyboard, focus, reconnect, and offline assets';
 if (require.main === module) console.log(module.exports);
