@@ -1,0 +1,277 @@
+// Libraries: Arduino handles pins/timing; WiFi creates the network;
+// WebServer serves the page; WebSockets carries live commands/status;
+// Preferences saves wheel trims in flash. The two local headers hold
+// hardware settings and the complete offline control page.
+#include <Arduino.h>
+#include <WiFi.h>
+#include <WebServer.h>
+#include <WebSocketsServer.h>
+#include <Preferences.h>
+#include "robot_config.h"
+#include "web_page.h"
+
+// Two modes: manual commands, or simple distance-based obstacle avoidance.
+enum Mode { MANUAL, DISTANCE };
+Mode currentMode = MANUAL;
+
+// Create persistent-storage and network-server objects once.
+// HTTP port 80 loads the page; WebSocket port 81 keeps controls responsive.
+Preferences prefs;
+WebServer httpServer(80);
+WebSocketsServer wsServer(81);
+
+// Shared runtime values. PWM magnitude is 0..255; each wheel has its
+// own trim because two nominally identical motors may run at different speeds.
+int leftPWM = 150, rightPWM = 150;
+int controller = -1;  // One controlling browser at a time.
+// millis() timestamps are milliseconds since boot. Subtract unsigned
+// timestamps rather than comparing absolute deadlines, so wraparound works.
+uint32_t lastHeartbeat = 0, lastDrive = 0, lastSensor = 0, lastStatus = 0;
+float distanceCM = -1;
+bool distanceValid = false;
+// Track manual motion so stale movement commands can stop the motors.
+bool manualMoving = false;
+const char* activity = "Stopped";
+
+// Low-level wheel control. Positive = logical forward; negative =
+// reverse; zero = no drive. The magnitude sets PWM duty cycle.
+// Each DRV8833 bridge uses two inputs: PWM/0 forward, 0/PWM reverse.
+// Inversion flags compensate for wheel mounting or motor-lead polarity.
+void moveMotor(int left, int right) {
+  left = constrain(left, -255, 255);
+  right = constrain(right, -255, 255);
+  if (INVERT_LEFT) left = -left;
+  if (INVERT_RIGHT) right = -right;
+  // Clear the opposite leg first when changing direction.
+  if (left >= 0) { analogWrite(MOTOR_IN2, 0); analogWrite(MOTOR_IN1, left); }
+  else { analogWrite(MOTOR_IN1, 0); analogWrite(MOTOR_IN2, -left); }
+  if (right >= 0) { analogWrite(MOTOR_IN4, 0); analogWrite(MOTOR_IN3, right); }
+  else { analogWrite(MOTOR_IN3, 0); analogWrite(MOTOR_IN4, -right); }
+}
+
+
+void stopMotors() {
+  moveMotor(0, 0);  // DRV8833 00 = coast, not active braking.
+  manualMoving = false;
+  activity = "Stopped";
+}
+
+// Stop and exit obstacle mode so the next loop cannot restart autonomous movement.
+void stopAndManual() {
+  stopMotors();
+  currentMode = MANUAL;
+}
+
+// Encode telemetry for the page. JSON null means no valid distance;
+// the browser displays it as No echo rather than treating it as zero cm.
+String statusJSON() {
+  String json = "{\"mode\":\"";
+  json += currentMode == MANUAL ? "MANUAL" : "DISTANCE";
+  json += "\",\"distance_cm\":";
+  json += distanceValid ? String(distanceCM, 1) : String("null");
+  json += ",\"activity\":\"";
+  json += activity;
+  json += "\"}";
+  return json;
+}
+
+// Translate a named command into differential wheel speeds.
+// Turning spins the wheels in opposite directions to turn on the spot.
+// Return false for unknown commands so callers can handle them safely.
+bool drive(const String& command) {
+  if (command == "forward") { moveMotor(leftPWM, rightPWM); activity = "Forward"; }
+  else if (command == "backward") { moveMotor(-leftPWM, -rightPWM); activity = "Reverse"; }
+  else if (command == "turnLeft") { moveMotor(-leftPWM, rightPWM); activity = "Turn left"; }
+  else if (command == "turnRight") { moveMotor(leftPWM, -rightPWM); activity = "Turn right"; }
+  else return false;
+  return true;
+}
+
+// WebSocket callback: runs when a browser connects, disconnects,
+// or sends a message. Only the accepted controller may issue commands.
+void webSocketEvent(uint8_t client, WStype_t type, uint8_t* payload, size_t length) {
+  // Accept one controller, reset to a stopped state, then send its first status.
+  if (type == WStype_CONNECTED) {
+    if (controller >= 0) { wsServer.disconnect(client); return; }
+    stopAndManual();
+    controller = client;
+    lastHeartbeat = millis();
+    String state = statusJSON();
+    wsServer.sendTXT(client, state);
+    return;
+  }
+  if (client != controller) return;
+  // A clean disconnection immediately ends manual or autonomous movement.
+  if (type == WStype_DISCONNECTED) {
+    controller = -1;
+    stopAndManual();
+    return;
+  }
+  if (type != WStype_TEXT) return;
+  // Copy only the supplied bytes; do not assume a NUL-terminated payload.
+  if (length == 0 || length > 32) { stopAndManual(); return; }
+  String command;
+  command.reserve(length);
+  for (size_t i = 0; i < length; ++i) command += static_cast<char>(payload[i]); // Copy the data received from the WebSocket into a String.
+
+  // Protocol: stop; heartbeat; mode:manual; mode:distance; or a drive name.
+  // Heartbeat proves the page is alive. It does not refresh a held-drive command.
+  if (command == "stop" || command == "mode:manual") stopAndManual();
+  else if (command == "heartbeat") lastHeartbeat = millis(); // JavaScript automatically sends "heartbeat" every 150 ms while the page is visible and connected.
+  else if (command == "mode:distance") {
+    stopAndManual();
+    currentMode = DISTANCE;
+    distanceValid = false;  // Require a new measurement before moving.
+    // Make the next sensor check due immediately, using unsigned subtraction.
+    lastSensor = millis() - SENSOR_INTERVAL_MS;
+    lastHeartbeat = millis();
+    activity = "Checking distance";
+  } else if (currentMode == MANUAL && drive(command)) {// if release the pressed button, the command will be "stop" and the robot will stop moving.
+    lastDrive = millis();
+    manualMoving = true;
+  } else if (currentMode == MANUAL) stopMotors(); // Triggerd by unknown command in manual mode.
+  String state = statusJSON(); // Calls statusJSON() to build the robot’s status message, then stores that text in a variable called state.
+  if (command != "heartbeat") wsServer.sendTXT(client, state);
+}
+
+// Read the ultrasonic sensor at the configured interval.
+void sampleDistance(uint32_t now) {
+  if (now - lastSensor < SENSOR_INTERVAL_MS) return;
+  lastSensor = now;
+  digitalWrite(PIN_TRIG, LOW);
+  delayMicroseconds(2);
+  digitalWrite(PIN_TRIG, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(PIN_TRIG, LOW);
+  const uint32_t duration = pulseInLong(PIN_ECHO, HIGH, ECHO_TIMEOUT_US);
+  //Trig pulse → sensor sends ultrasound → Echo goes HIGH → reflected sound returns → Echo goes LOW
+  distanceCM = duration * 0.0343f / 2.0f;
+  distanceValid = duration != 0 && distanceCM >= 2.0f && distanceCM <= 400.0f;
+}
+
+// Simple obstacle avoidance: forward while farther than 20 cm; otherwise
+// turn on the spot until a fresh reading shows the path is clear.
+void handleDistanceMode() {
+  if (!distanceValid) {
+    stopMotors();
+    activity = "No valid echo";
+    return;
+  }
+
+  if (distanceCM > OBSTACLE_CM) drive("forward");
+  else drive("turnRight");  // Fixed escape direction; no reversing or timers.
+}
+
+// Two independent stop checks: lost page heartbeat ends the session
+// and autonomy; stale drive commands stop manual movement even if the page
+// still sends heartbeats. Both checks run in loop(), not a hardware interrupt.
+void checkControlTimeouts(uint32_t now) {
+  if (controller >= 0 && now - lastHeartbeat > CONTROL_TIMEOUT_MS) {
+    const int expiredClient = controller;
+    controller = -1;
+    stopAndManual();
+    wsServer.disconnect(expiredClient);
+  }
+  if (manualMoving && now - lastDrive > CONTROL_TIMEOUT_MS) stopMotors();
+  if (controller < 0) stopAndManual();// If no browser has control, keep the robot stopped in manual mode.
+}
+
+// Optional USB Serial wheel trim. L/R increase a wheel PWM; l/r
+// decrease it; S saves both trims in flash. Changing a trim cancels motion.
+void serialCalibration() {
+  if (!Serial.available()) return;
+  const char c = Serial.read();
+  bool changed = false;
+  switch (c) {
+    case 'L': ++leftPWM; changed = true; break;
+    case 'l': --leftPWM; changed = true; break;
+    case 'R': ++rightPWM; changed = true; break;
+    case 'r': --rightPWM; changed = true; break;
+    case 'S':
+      prefs.putInt("leftPWM", leftPWM);
+      prefs.putInt("rightPWM", rightPWM);
+      Serial.println("Calibration saved.");
+      break;
+  }
+  if (changed) {
+    leftPWM = constrain(leftPWM, 0, 255);
+    rightPWM = constrain(rightPWM, 0, 255);
+    stopAndManual();
+    Serial.printf("PWM: L=%d R=%d\n", leftPWM, rightPWM);
+  }
+}
+
+
+void setup() {
+  pinMode(MOTOR_IN1, OUTPUT);
+  pinMode(MOTOR_IN2, OUTPUT);
+  pinMode(MOTOR_IN3, OUTPUT);
+  pinMode(MOTOR_IN4, OUTPUT);
+  stopMotors();
+  pinMode(PIN_TRIG, OUTPUT);
+  digitalWrite(PIN_TRIG, LOW);
+  pinMode(PIN_ECHO, INPUT);
+  pinMode(MPU_INT, INPUT);  // Reserved only; MPU6050 not read in this stage.
+
+
+  Serial.begin(115200);
+  // Give USB Serial a short chance to attach, but still boot without a PC.
+  const uint32_t serialStarted = millis();
+  while (!Serial && millis() - serialStarted < 2000) delay(10);
+  Serial.println("[BOOT] XIAO Robot AP firmware starting");
+
+  prefs.begin("servoCalib", false);  // Preserve existing wheel calibration.
+  leftPWM = constrain(prefs.getInt("leftPWM", 150), 0, 255);
+  rightPWM = constrain(prefs.getInt("rightPWM", 150), 0, 255);
+  Serial.printf("PWM: L=%d R=%d. L/l and R/r adjust; S saves.\n", leftPWM, rightPWM);
+
+  // Fixed local address: phone connects directly to the robot, without a router.
+  const IPAddress address(192, 168, 4, 1), subnet(255, 255, 255, 0);
+  WiFi.mode(WIFI_AP);
+  if (!WiFi.softAPConfig(address, address, subnet) ||
+      !WiFi.softAP(AP_SSID, AP_PASSWORD, 1, false, 1)) {
+    Serial.println("AP startup failed; motors remain stopped. Reset to retry.");
+    while (true) { stopMotors(); delay(100); }
+  }
+  Serial.printf("Wi-Fi: %s\nPassword: %s\nOpen http://%s\n",
+                AP_SSID, AP_PASSWORD, WiFi.softAPIP().toString().c_str());
+  // Serve the embedded HTML from flash. No separate CSS/JS/filesystem upload
+  // is required; no-store asks the browser to fetch the current firmware page.
+  httpServer.on("/", []() {
+    httpServer.sendHeader("Cache-Control", "no-store");
+    httpServer.send_P(200, "text/html; charset=utf-8", HTML_PAGE);
+  });
+  httpServer.onNotFound([]() { httpServer.send(404, "text/plain", "Open http://192.168.4.1/"); });
+  wsServer.begin();
+  wsServer.onEvent(webSocketEvent);
+  httpServer.begin();
+}
+
+void loop() {
+  // Enforce timeouts before accepting queued commands and before autonomy.
+  checkControlTimeouts(millis());
+  httpServer.handleClient();
+  wsServer.loop();
+  checkControlTimeouts(millis());
+  sampleDistance(millis());
+  checkControlTimeouts(millis());
+  if (currentMode == DISTANCE) handleDistanceMode();
+  serialCalibration();
+  // Send display updates four times per second without delaying the loop.
+  if (millis() - lastStatus >= 250) {
+    lastStatus = millis();
+    if (controller >= 0) { String state = statusJSON(); wsServer.sendTXT(controller, state); }
+  }
+  // Repeat a small diagnostic so opening Serial Monitor after boot still
+  // shows output. Skip if USB isn't ready or its transmit buffer is full.
+  static uint32_t lastSerialReport = 0;
+  if (millis() - lastSerialReport >= 2000) {
+    lastSerialReport = millis();
+    if (Serial && Serial.availableForWrite() >= 160) {
+      Serial.printf("[Robot running] uptime=%lu s mode=%s Wi-Fi=%s URL=http://%s/\n",
+                    static_cast<unsigned long>(millis() / 1000),
+                    currentMode == MANUAL ? "MANUAL" : "DISTANCE",
+                    AP_SSID, WiFi.softAPIP().toString().c_str());
+    }
+  }
+}
