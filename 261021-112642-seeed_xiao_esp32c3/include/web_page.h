@@ -22,7 +22,7 @@ header{display:flex;align-items:center;justify-content:space-between;gap:12px}h1
 .panel{background:#1b2639;border:1px solid #34425b;border-radius:18px;padding:20px;margin-top:20px}
 /* Mode selector buttons; aria-pressed also supplies their visual highlight. */
 .modes{display:grid;grid-template-columns:1fr 1fr;gap:10px}button{font:inherit;border:1px solid #4e607c;border-radius:12px;background:#293951;color:#fff;font-size:18px;min-height:68px;padding:16px;cursor:pointer}
-#calibrationMode{grid-column:1 / -1}#uprightValue{width:100%;box-sizing:border-box;padding:12px;margin:10px 0;font:inherit;background:#101827;color:#fff;border:1px solid #4e607c;border-radius:8px}
+[hidden]{display:none!important}#uprightValue{width:100%;box-sizing:border-box;padding:12px;margin:10px 0;font:inherit;background:#101827;color:#fff;border:1px solid #4e607c;border-radius:8px}
 #motorOff{width:100%;margin-top:10px;background:#8c3346;border-color:#d66d82}
 button:disabled{opacity:.4;cursor:default}button[aria-pressed="true"]{background:#126e5b;border-color:#83e5c7}
 button:focus-visible{outline:3px solid #83e5c7;outline-offset:3px}.hint{color:#b5c4d9;font-size:14px;line-height:1.5;margin:14px 0 0}
@@ -33,6 +33,7 @@ button:focus-visible{outline:3px solid #83e5c7;outline-offset:3px}.hint{color:#b
 /* STOP sits between left/right; emergency motor-off stays below the pad. */
 #stop{grid-area:stop;width:100%;background:#8c3346;border-color:#d66d82;font-weight:700;margin:0;min-height:104px;padding:8px;touch-action:manipulation}
 .robot-status{margin-top:16px}.robot-status .readings{margin:10px 0 0}.robot-status .hint{margin:6px 0;font-variant-numeric:tabular-nums}#captureUpright,#saveUpright{width:100%;margin-top:10px}
+.pid-fields{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}.pid-fields input{width:100%;box-sizing:border-box;padding:12px;margin-top:6px;font:inherit;background:#101827;color:#fff;border:1px solid #4e607c;border-radius:8px}#applyPID,#savePID,#applyDeadZone,#saveDeadZone{width:100%;margin-top:10px}
 footer{font-size:12px;color:#92a5bf;line-height:1.6;margin-top:18px}kbd{font-family:inherit}#modeLabel{font-size:14px;color:#b5c4d9}
 </style>
 </head>
@@ -48,8 +49,8 @@ footer{font-size:12px;color:#92a5bf;line-height:1.6;margin-top:18px}kbd{font-fam
 <div class="readings"><span id="distance">-- cm</span><span id="activity">Stopped</span></div>
 </section>
 <section class="panel" aria-label="Driving mode">
-<div class="modes"><button id="manual" aria-pressed="true" disabled>Remote drive</button><button id="distanceMode" aria-pressed="false" disabled>Avoid obstacles</button><button id="calibrationMode" aria-pressed="false" disabled>IMU calibration</button></div>
-<p id="modeLabel" aria-live="polite">Remote: hold arrows to drive; release to balance.</p>
+<div class="modes"><button id="manual" aria-pressed="true" disabled>Remote drive</button><button id="distanceMode" aria-pressed="false" disabled>Avoid obstacles</button><button id="calibrationMode" aria-pressed="false" disabled>IMU calibration</button><button id="pidMode" aria-pressed="false" disabled>PID settings</button></div>
+<p id="modeLabel" aria-live="polite">Remote: arrows drive; attitude correction stays active.</p>
 </section>
 <section class="panel" id="calibrationPanel" aria-label="IMU calibration" hidden>
 <h2>Set upright angle</h2>
@@ -61,7 +62,7 @@ footer{font-size:12px;color:#92a5bf;line-height:1.6;margin-top:18px}kbd{font-fam
 <p class="hint" id="calibrationMessage" role="status">Waiting for robot status...</p>
 </section>
 <!-- Distance/activity are filled by status messages; data-command names match firmware. -->
-<section class="panel" aria-label="Robot controls">
+<section class="panel" id="drivePanel" aria-label="Robot controls">
 
 <div class="pad">
 <button class="drive" id="forward" data-command="forward" aria-label="Forward" disabled>&#8593;</button>
@@ -73,19 +74,52 @@ footer{font-size:12px;color:#92a5bf;line-height:1.6;margin-top:18px}kbd{font-fam
 
 <button id="motorOff" disabled>EMERGENCY STOP</button>
 </section>
+<section class="panel" id="pidPanel" aria-label="Attitude PID tuning" hidden>
+<h2>Attitude PID</h2>
+<p class="hint">Enter all three gains, then press Apply or Save. Motors stay off here; select Remote drive to test.</p>
+<div class="pid-fields">
+<label for="pidP">P<input id="pidP" type="number" min="0" max="200" step="0.001" inputmode="decimal" disabled></label>
+<label for="pidI">I<input id="pidI" type="number" min="0" max="500" step="0.001" inputmode="decimal" disabled></label>
+<label for="pidD">D<input id="pidD" type="number" min="0" max="50" step="0.001" inputmode="decimal" disabled></label>
+</div>
+<button id="applyPID" disabled>Apply PID</button>
+<button id="savePID" disabled>Save PID to robot</button>
+<h3>Angle dead zone</h3>
+<p class="hint">No attitude correction within this many degrees on either side of upright. Driving still works. Set 0 to disable the band.</p>
+<div class="pid-fields"><label for="deadZone">+/- degrees<input id="deadZone" type="number" min="0" max="90" step="0.1" value="2" inputmode="decimal" disabled></label></div>
+<button id="applyDeadZone" disabled>Apply dead zone</button>
+<button id="saveDeadZone" disabled>Save dead zone to robot</button>
+<p class="hint" id="deadZoneActive">Active dead zone: waiting...</p>
+<p class="hint" id="deadZoneMessage" role="status">Default: +/-2 degrees.</p>
+<p class="hint" id="pidActive">Waiting for gains...</p>
+<p class="hint" id="pidMessage" role="status">Apply is temporary; Save retains gains after restart.</p>
+</section>
 <footer>Keep this page visible while driving. Keyboard: arrows or WASD.</footer>
 </main>
 <!-- 4. JavaScript connects controls to the robot over a persistent WebSocket. -->
 <script>
 'use strict';
-// Cache page elements and track the connection, mode, and one active input.
 // heldInput distinguishes a particular touch pointer from a keyboard key.
 const $ = id => document.getElementById(id);
 const driveButtons = [...document.querySelectorAll('.drive')];
 let socket, connected = false, hasStatus = false, mode = 'MANUAL', held = null, heldInput = null;
 let latestAngle = null, imuReady = false;
+// Both settings forms use the same validation, send and confirmation flow.
+const tuning = {
+  pid: {name:'PID', fields:['pidP','pidI','pidD'], keys:['pid_p','pid_i','pid_d'], limits:[200,500,50],
+    active:'pidActive', message:'pidMessage', invalid:'Enter P 0..200, I 0..500, D 0..50.',
+    format:v => 'P ' + v[0] + ' | I ' + v[1] + ' | D ' + v[2]},
+  deadzone: {name:'dead zone', fields:['deadZone'], keys:['deadzone_deg'], limits:[90],
+    active:'deadZoneActive', message:'deadZoneMessage', invalid:'Enter a dead zone from 0 to 90 degrees.',
+    format:v => '+/-' + v[0] + ' degrees'}
+};
+function resetTuning() {
+  Object.values(tuning).forEach(form => {
+    form.loaded = false; form.revision = 0; form.pending = null; form.feedback = '';
+  });
+}
+resetTuning();
 const keys = {ArrowUp:'forward',w:'forward',ArrowDown:'backward',s:'backward',ArrowLeft:'turnLeft',a:'turnLeft',ArrowRight:'turnRight',d:'turnRight'};
-// Send only while the socket is open. Returning false means nothing was sent.
 function send(command) {
   if (!connected || socket.readyState !== WebSocket.OPEN) return false;
   socket.send(command);
@@ -103,35 +137,38 @@ function releaseDrive() {
   clearHeld();
   if (wasHeld) send('stop');
 }
-// Release/STOP hands over to balance; MOTORS OFF cuts drive immediately.
+// STOP clears base driving; emergency stop disables the controller too.
 function stopAll() { clearHeld(); send('stop'); }
-function canDrive(command) {
+function canDrive() {
   return connected && hasStatus && mode === 'MANUAL';
 }
-// Accept movement commands only in manual mode.
-// Ignore additional simultaneous
-// fingers/keys so they cannot silently replace the active input.
+// Manual mode accepts one touch/key at a time.
 function startDrive(command, input) {
-  if (!canDrive(command) || heldInput !== null) return;
+  if (!canDrive() || heldInput !== null) return;
   held = command; heldInput = input;
   driveButtons.forEach(button => button.classList.toggle('active', button.dataset.command === command));
   send(command);
 }
-// Keep enabled controls and mode highlights aligned with firmware telemetry.
 function updateControls() {
+  const manual = mode === 'MANUAL', distance = mode === 'DISTANCE';
+  const calibration = mode === 'CALIBRATION', tuning = mode === 'PID_TUNING';
   const enabled = connected && hasStatus;
-  driveButtons.forEach(button => button.disabled = !canDrive(button.dataset.command));
+  driveButtons.forEach(button => button.disabled = !canDrive());
   $('manual').disabled = $('distanceMode').disabled = !enabled;
   $('stop').disabled = $('motorOff').disabled = !enabled;
-  $('calibrationMode').disabled = !enabled;
-  $('calibrationMode').setAttribute('aria-pressed', String(mode === 'CALIBRATION'));
-  $('calibrationPanel').hidden = mode !== 'CALIBRATION';
-  $('uprightValue').disabled = !enabled || mode !== 'CALIBRATION';
-  $('captureUpright').disabled = !enabled || mode !== 'CALIBRATION' || !imuReady || latestAngle === null;
-  $('saveUpright').disabled = !enabled || mode !== 'CALIBRATION' || !imuReady;
-  $('manual').setAttribute('aria-pressed', String(mode === 'MANUAL'));
-  $('distanceMode').setAttribute('aria-pressed', String(mode === 'DISTANCE'));
-  $('modeLabel').textContent = mode === 'CALIBRATION' ? 'Calibration: set and save upright angle; motors off.' : mode === 'DISTANCE' ? 'Distance: forward above 20 cm; reverse below 5 cm; otherwise left. No echo keeps moving.' : 'Remote: hold arrows to drive; release to balance.';
+  $('calibrationMode').disabled = $('pidMode').disabled = !enabled;
+  $('pidMode').setAttribute('aria-pressed', String(tuning));
+  $('pidPanel').hidden = !tuning;
+  $('drivePanel').hidden = tuning;
+  ['pidP','pidI','pidD','applyPID','savePID','deadZone','applyDeadZone','saveDeadZone'].forEach(id => $(id).disabled = !enabled || !tuning);
+  $('calibrationMode').setAttribute('aria-pressed', String(calibration));
+  $('calibrationPanel').hidden = !calibration;
+  $('uprightValue').disabled = !enabled || !calibration;
+  $('captureUpright').disabled = !enabled || !calibration || !imuReady || latestAngle === null;
+  $('saveUpright').disabled = !enabled || !calibration || !imuReady;
+  $('manual').setAttribute('aria-pressed', String(manual));
+  $('distanceMode').setAttribute('aria-pressed', String(distance));
+  $('modeLabel').textContent = tuning ? 'PID settings: adjust and save gains; motors off.' : calibration ? 'Calibration: set and save upright angle; motors off.' : distance ? 'Distance: forward above 20 cm; reverse below 5 cm; otherwise left. No echo keeps moving.' : 'Remote: arrows drive; attitude correction stays active.';
 }
 // Firmware changes the mode; the browser waits for its status acknowledgement.
 function selectMode(command) { clearHeld(); send(command); }
@@ -151,12 +188,12 @@ driveButtons.forEach(button => {
   button.addEventListener('lostpointercapture', end);
   button.addEventListener('contextmenu', event => event.preventDefault());
 });
-// Mode/STOP buttons send the same short text commands understood by firmware.
 $('manual').addEventListener('click', () => selectMode('mode:manual'));
 $('distanceMode').addEventListener('click', () => selectMode('mode:distance'));
 $('motorOff').addEventListener('click', () => selectMode('motors:off'));
 $('stop').addEventListener('click', stopAll);
 $('calibrationMode').addEventListener('click', () => selectMode('mode:calibration'));
+$('pidMode').addEventListener('click', () => selectMode('mode:pid'));
 $('captureUpright').addEventListener('click', () => {
   if (mode === 'CALIBRATION' && imuReady && latestAngle !== null) $('uprightValue').value = latestAngle.toFixed(2);
 });
@@ -170,9 +207,61 @@ $('saveUpright').addEventListener('click', () => {
   }
   send('imu:save:' + value.toFixed(2));
 });
+// Typing never applies a setting. Only these buttons send it to the robot.
+function submitTuning(kind, save) {
+  if (!connected || !hasStatus || mode !== 'PID_TUNING') return;
+  const form = tuning[kind];
+  const raw = form.fields.map(id => String($(id).value || '').trim());
+  const values = raw.map(Number);
+  if (raw.some(value => !value) || values.some((v,i) => !Number.isFinite(v) || v < 0 || v > form.limits[i])) {
+    $(form.message).textContent = form.invalid;
+    return;
+  }
+  clearHeld();
+  const request = {values:values.map(v => Number(v.toFixed(3))), revision:form.revision};
+  form.pending = request;
+  form.feedback = 'Waiting for robot confirmation...';
+  $(form.message).textContent = form.feedback;
+  if (!send(kind + (save ? ':save:' : ':apply:') + request.values.map(v => v.toFixed(3)).join(','))) {
+    form.pending = null;
+    $(form.message).textContent = form.feedback = 'Settings not sent - reconnect and try again.';
+    return;
+  }
+  setTimeout(() => {
+    if (form.pending !== request) return;
+    form.pending = null;
+    $(form.message).textContent = form.feedback = 'No ' + form.name + ' confirmation received - check connection and uploaded firmware.';
+  }, 3000);
+}
+
+function showTuning(kind, state) {
+  const form = tuning[kind], values = form.keys.map(key => state[key]);
+  const valid = values.every(Number.isFinite), message = state[kind + '_message'] || '';
+  if (valid) {
+    if (!form.loaded) form.fields.forEach((id,i) => $(id).value = String(values[i]));
+    form.loaded = true;
+    $(form.active).textContent = 'Active ' + (kind === 'deadzone' ? 'dead zone: ' : '') + form.format(values);
+  }
+  const revision = state[kind + '_update'];
+  if (Number.isFinite(revision)) {
+    form.revision = revision;
+    if (form.pending && revision > form.pending.revision) {
+      const matches = valid && values.every((v,i) => Math.abs(v - form.pending.values[i]) < 0.0005);
+      form.feedback = matches && !/failed|cannot|invalid/i.test(message) ?
+        'Robot confirmed ' + form.format(values) + '. ' + message : form.name + ' not applied as requested. ' + message;
+      form.pending = null;
+    }
+  }
+  $(form.message).textContent = form.feedback || message || 'Apply is temporary; Save remembers settings after restart.';
+}
+$('applyPID').addEventListener('click', () => submitTuning('pid', false));
+$('savePID').addEventListener('click', () => submitTuning('pid', true));
+$('applyDeadZone').addEventListener('click', () => submitTuning('deadzone', false));
+$('saveDeadZone').addEventListener('click', () => submitTuning('deadzone', true));
 // Keyboard driving uses keydown/keyup. Ignore operating-system key repeats;
 // the periodic refresh below handles continuous held motion.
 document.addEventListener('keydown', event => {
+  if (event.target && ['INPUT','TEXTAREA','SELECT'].includes(event.target.tagName)) return;
   if (event.code === 'Space') { event.preventDefault(); stopAll(); return; }
   const command = keys[event.key];
   if (!command) return;
@@ -187,12 +276,14 @@ document.addEventListener('keyup', event => {
 window.addEventListener('blur', stopAll);
 window.addEventListener('pagehide', stopAll);
 document.addEventListener('visibilitychange', () => { if (document.hidden) stopAll(); });
-// Open a connection to this board on port 81; HTTP loaded the page on port 80.
 function connect() {
   socket = new WebSocket('ws://' + location.hostname + ':81/');
   // Connected starts with no held movement. The firmware sends the current state.
   socket.onopen = () => {
-    connected = true; hasStatus = false; clearHeld();
+    connected = true;
+    hasStatus = false;
+    resetTuning();
+    clearHeld();
     $('connection').textContent = 'Getting robot status...';
     updateControls();
   };
@@ -201,7 +292,7 @@ function connect() {
   socket.onmessage = event => {
     let state;
     try { state = JSON.parse(event.data); } catch (_) { return; }
-    if (!['MANUAL', 'DISTANCE', 'CALIBRATION'].includes(state.mode)) return;
+    if (!['MANUAL', 'DISTANCE', 'CALIBRATION', 'PID_TUNING'].includes(state.mode)) return;
     const enteringCalibration = state.mode === 'CALIBRATION' && mode !== 'CALIBRATION';
     if (state.mode !== mode) clearHeld();
     mode = state.mode;
@@ -211,20 +302,29 @@ function connect() {
     if (enteringCalibration && Number.isFinite(state.target_deg)) $('uprightValue').value = state.target_deg.toFixed(2);
     $('calibrationMessage').textContent = state.calibration_message || 'Hold upright, capture or enter an angle, then save.';
     $('connection').textContent = 'Connected';
-    $('distance').textContent = state.balance_active ? 'Ultrasonic paused' : state.distance_cm === null ? 'No echo' : Number(state.distance_cm).toFixed(1) + ' cm';
+    $('distance').textContent = state.distance_cm === null ? 'No echo' : Number(state.distance_cm).toFixed(1) + ' cm';
     $('activity').textContent = state.activity;
+    showTuning('pid', state);
+    showTuning('deadzone', state);
     const degrees = value => value == null ? '--' : Number(value).toFixed(1);
     $('angles').textContent = 'Angle: ' + degrees(state.angle_deg) + ' deg | Target: ' +
       degrees(state.target_deg) + ' deg | Tilt: ' + degrees(state.tilt_deg) + ' deg';
     const pwm = Number.isFinite(state.balance_pwm) ? String(state.balance_pwm) : '--';
-    $('balanceInfo').textContent = (state.balance_active ? 'Balancing upright' :
-      state.balance_pending ? 'Waiting to balance' : 'Balance off') +
-      ' | ' + (state.balance_message || 'IMU status unavailable') + ' | Motor PWM: ' + pwm;
+    const left = Number.isFinite(state.output_left) ? state.output_left : '--';
+    const right = Number.isFinite(state.output_right) ? state.output_right : '--';
+    $('balanceInfo').textContent = (state.balance_active ? 'Attitude correction active' :
+      state.balance_pending ? 'Waiting for controller' : 'Controller off') +
+      ' | Correction PWM: ' + pwm + ' | Wheels L ' + left + ' R ' + right +
+      (state.output_limited ? ' | Output limited' : '') +
+      (!state.balance_active ? ' | ' + (state.balance_message || 'IMU status unavailable') : '');
     updateControls();
   };
   // Disable controls and clear held movement before scheduling a reconnect.
   socket.onclose = () => {
-    connected = false; hasStatus = false; imuReady = false; latestAngle = null; clearHeld();
+    connected = hasStatus = imuReady = false;
+    latestAngle = null;
+    resetTuning();
+    clearHeld();
     $('connection').textContent = 'Disconnected';
     $('angles').textContent = 'Angle: -- deg | Target: -- deg | Tilt: -- deg (disconnected)';
     $('balanceInfo').textContent = 'Disconnected - no live IMU data';
@@ -236,15 +336,14 @@ function connect() {
   socket.onerror = () => socket.close();
 }
 // Held commands refresh the motor dead-man timer. Heartbeats alone never move it.
-// Every 150 ms: heartbeat keeps the session alive in either mode. A held
+// Every 150 ms: heartbeat keeps the session alive in every mode. A held
 // movement additionally refreshes the separate manual-drive watchdog.
 // Hidden pages send neither. Firmware stops on a connection timeout.
 setInterval(() => {
   if (!connected || document.hidden) return;
   send('heartbeat');
-  if (held && canDrive(held)) send(held);
+  if (held && canDrive()) send(held);
 }, 150);
-// Start the connection after the page elements and handlers have been created.
 connect();
 </script></body></html>
 )HTML";

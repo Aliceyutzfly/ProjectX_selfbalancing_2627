@@ -1,14 +1,20 @@
-# Arduino IDE .ino build verification
+# Arduino IDE build verification
 
-Verified 23 October 2026 with Arduino CLI and Espressif Arduino ESP32 core 3.3.5.
+Verified 26 October 2026 with Arduino CLI and Espressif Arduino ESP32 core 3.3.5.
 
 - Board: XIAO_ESP32C3. USB CDC On Boot: Enabled.
-- FQBN: esp32:esp32:XIAO_ESP32C3:CDCOnBoot=default.
-- Actual application tabs: Robot_ArduinoIDE.ino and Balance.ino.
-- Application .cpp files: none. Only bundled third-party libraries use .cpp/.c.
-- All four third-party libraries compile from src/lib; no separate installations are required.
-- Flash: 1,065,002 / 1,310,720 bytes.
-- Global RAM: 38,356 / 327,680 bytes.
-- Compile/link: PASS. Nothing uploaded or hardware-tested.
+- FQBN: `esp32:esp32:XIAO_ESP32C3:CDCOnBoot=default`.
+- Application tabs: `Robot_ArduinoIDE.ino` and `Balance.ino`.
+- Compile/link: PASS. Flash: **1,076,448 / 1,310,720 bytes (82%)**.
+- Global RAM: **38,404 / 327,680 bytes (11%)**.
+- All four bundled third-party libraries compile from `src/lib`.
+- No application `.cpp` files; only third-party libraries use `.cpp`/`.c`.
+- Nothing uploaded or hardware-tested.
 
-Arduino concatenates the .ino tabs into one translation unit. Explicit declarations and robot_types.h preserve type visibility; application mode identifiers avoid the PID library's MANUAL macro. Settings, webpage and robot behavior remain the same. Verification used an isolated workspace copy of the board core, without modifying the shared Arduino installation.
+## PlatformIO parity
+
+All **45 application function definitions** match the current PlatformIO source after normalizing application mode identifiers. `robot_config.h`, `balance.h` and `web_page.h` are byte-identical. Arduino-specific differences are bundled-library include paths, explicit function prototypes, shared enums in `robot_types.h`, distinct application mode identifiers to avoid PID macros, and removal of the internal anonymous namespace for Arduino sketch preprocessing.
+
+Includes continuous drive plus attitude correction, the PID settings page and confirmations, saved upright calibration, saved PID/dead-zone settings, the default +/-2 degree angle dead zone, PWM output dead zone 50, and current motion/configuration values. Code organization and formatting follow the current PlatformIO version.
+
+Verification used an isolated workspace board-core configuration and build directory; the shared Arduino installation was not modified.

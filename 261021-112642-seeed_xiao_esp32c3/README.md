@@ -1,48 +1,50 @@
-# XIAO robot: two modes
+# PlatformIO robot: continuous drive plus attitude correction
 
-## Operation
+This PlatformIO project now differs from the Arduino .ino package, which was intentionally left unchanged.
 
-- Manual: hold arrows or WASD to move remotely.
-- Distance: valid distance above 20 cm goes forward; below 5 cm goes backward; 5 through 20 cm turns left. No echo keeps the previous distance-mode movement and its ramp; with no previous movement it starts forward.
-- Both modes use requestMotion() and updateDriveMotion(). Forward and backward use an S-shaped PWM ramp. Release/STOP cancels the drive ramp and hands control immediately to upright PID, without a stopping ramp. Left/right turns apply immediately. Repeated commands do not restart a ramp. Releasing a turn also immediately requests upright balancing.
-- STOP exits distance mode, cancels ordinary motor drive, and starts upright balancing as soon as fresh IMU data/posture allow it. MOTORS OFF, disconnect, malformed input, and stale manual commands cut motor output immediately. Startup/reconnect never restart motion. Upright balance automatically starts when stopped with fresh IMU data and within 20 degrees of calibrated upright. It also starts from the initial stopped state. Movement commands disable balance. Normal release/STOP requests balancing immediately. Safety stops disable everything and do not auto-rearm.
+## Start here
 
-DRIVE_RAMP_MS in include/robot_config.h is currently 2000 ms. The obsolete STOP_RAMP_MS setting has been removed. The S curve shapes commanded PWM, not measured acceleration. Forward/backward reversals take time: check physical clearance, particularly the 5 cm reverse threshold, with the robot supported first.
+| To understand or change | Read |
+| --- | --- |
+| Pins, gains, PWM limits and timing | `include/robot_config.h` |
+| Forward, reverse, turns and S-ramp | `requestMotion()` and `updateDriveMotion()` in `src/main.cpp` |
+| Distance decisions | `handleDistanceMode()` in `src/main.cpp` |
+| Browser command meanings | `handleCommand()` in `src/main.cpp` |
+| PID and final wheel output | `updateAttitudeCorrection()` and `writeMixedMotorOutputs()` in `src/balance.cpp` |
+| Page layout and browser input | `include/web_page.h` |
 
-## Upload and control
+The control path is: browser/distance decision -> base wheel requests -> PID correction -> mix -> saturation -> PWM dead zone -> motors. The saved upright target stays fixed while driving. `armPending` means one enable attempt is waiting for fresh IMU data; it clears after that attempt. Settings pages and emergency/fault stops cannot automatically resume movement.
 
-Open this main project in PlatformIO, build, then upload using the board's current COM port. Stop Serial Monitor before uploading. Serial Monitor is 115200 baud. Join XIAO-Robot (password robotdrive), then open http://192.168.4.1/. The page shows AP_SSID from configuration. No Internet or separate webpage upload is required. One controlling browser is allowed; heartbeats/held commands refresh every 150 ms and the timeout is 800 ms. Normal release/STOP requests upright PID immediately; heartbeat loss disables both drive and balancing.
+The browser uses one shared settings flow (`submitTuning`/`showTuning`) for PID and the angle dead zone. Each form supplies its field names and limits; send, acknowledgement, timeout and reconnect handling are shared. Firmware command routing is separate from WebSocket connection handling.
 
-## Wiring and speed trim
+## Controller
 
-DRV8833 IN1..IN4 use D0..D3. HC-SR04 Trig is D10 and Echo is D7. All grounds are common. Echo requires level shifting from 5 V to a suitable 3.3 V input; using a 3.3 V Trig does not lower Echo voltage. MPU6050 SDA/SCL/INT use D4/D5/D6 with supported 3.3 V supply and common ground. Provide a suitable motor supply; do not power the motors from the XIAO 3V3 output. Check motor directions with wheels raised.
+One 10 ms task owns motor PWM. The web/ultrasonic loop publishes base left/right requests; it never writes nonzero motor PWM directly. Each fresh IMU sample runs attitude PID around the saved upright target, adds the same bounded correction to both wheel requests, and clips each final output to -255..255. There is no output normalisation or alternate manual-versus-balance ownership. The base pair already contains wheel trim and differential steering.
 
-PWM limits are 0..255. Source defaults and inversion flags are preserved. Saved flash trims override source defaults; without saved values the source defaults now apply. Serial L/l and R/r adjust wheel trims; S saves. Changing trim stops the robot. Existing backups and the separate standalone PID project are preserved.
+Defaults: P=21, I=0, D=0.8. ATTITUDE_MAX_PWM=255 bounds correction separately from the final motor limits. I defaults to zero because sustained attitude integral can fight intentional driving on a self-righting chassis. These are starting values, not validated tuning. Near base PWM 254, almost no positive correction headroom remains; the page reports Output limited when mixing clips. There is no angle cutoff. Gains/sign/limit need supported hardware tests; bounded correction does not guarantee stability.
 
-## Checks
+Manual: hold arrows/WASD. Forward/backward from STOP starts at magnitude 100 and S-ramps to saved wheel trims (source defaults 254) over 1000 ms. Turns change the base pair immediately. Release/STOP immediately zeros base drive while attitude correction continues; STOP exits distance mode. Distance: forward above 20 cm, backward below 5 cm, left from 5 through 20 cm. No echo preserves the previous motion; with no movement it starts forward. Ultrasonic sampling continues while the independent controller runs.
 
-Build with PlatformIO. Run node test/web_ui.cjs for the embedded browser controls and node test/motion.cjs for actual main.cpp transition functions mechanically translated into a mocked hardware/time harness. These checks do not simulate chassis physics or establish real-world stopping distance.
+EMERGENCY STOP, disconnect, stale manual commands, sensor errors/stale data/backlog, delayed control or main-loop drive-publication timeout disable the controller and both motors. Faults do not auto-rearm from repeated held commands; use STOP or a new direction after fixing the cause. Startup requests zero-base stabilization when fresh IMU data arrives. Calibration disables all motor output. No motor can run without a healthy IMU in this architecture.
 
-## Always-visible angle and target
+## Wireless PID controls
 
-The page displays raw PID Angle and Target (upright is 178 degrees), plus Tilt relative to upright, in manual, distance, and stopped operation. Sensor reads continue while driving; only motor correction is disabled. Missing angle data displays --, not a made-up zero. Target remains visible even if the sensor fails. Disconnected values are marked unavailable. Ultrasonic measurement is paused while balancing to avoid blocking Echo waits.
+Select PID settings in the mode selector to show active P/I/D and editing controls. Entering this mode stops all motors; settings are hidden in other modes. Apply PID changes RAM only; Save PID to robot also persists the complete triple in one Preferences blob (attitudePID/gains). Gain ranges are P 0..200, I 0..500, D 0..50. All values must be finite. Both actions cancel held input, stop all motor output, reset PID history and leave control disabled in PID settings until you select Remote drive or Avoid obstacles. Saving failure restores the previous runtime gains and reports failure. There is no automatic flash write on every loop. Typed fields are not overwritten by incoming telemetry. Typing alone does not apply gains: press Apply or Save. The page waits for a numbered robot acknowledgement and compares all three returned gains; rejection or no acknowledgement is shown explicitly. Active gains come directly from PID_v1 getters. Motors remain off in PID settings; select Remote drive to test. Correction saturation at the configured correction limit can mask gain changes. Keyboard driving is ignored while a form input is focused.
 
-The stopped PID reuses Kp 21, Ki 140, Kd 0.8 and the supplied gyro/acceleration offsets. It runs in a background task about every 10 ms. Both inverted motor outputs are compensated with BALANCE_OUTPUT_SIGN=-1. Stop/fall cutoff is 20 degrees; failed/stale IMU data, FIFO backlog or delayed task switch balance off. A normal STOP retries after a fault or MOTORS OFF; there is no repeated automatic re-arm after activation fails. Initially waiting for fresh readings/upright posture is not a latched fault. No correction is applied during forward/backward/turning while driving.
+## Angle dead zone
 
-MOTORS OFF, disconnect, stale manual commands, serial trim changes disable balance. Missing ultrasonic echoes no longer stop distance-mode movement. Startup can balance without a browser once fresh/upright, as requested for stopped operation. Reconnecting after a safety stop does not reactivate it. Balance may move the wheels and robot; it is not position hold. Support the robot for the first hardware test and check correction direction, STOP handoff, immediate motor-off and faults. Compile and mocked tests do not verify physical stability.
+PID settings includes a separate angle dead zone, default +/-2 degrees around the saved upright target. Within and exactly on its boundaries, attitude PWM is zero and the PID integral/history is reset before correction resumes outside the band. Base driving commands remain active. Apply dead zone is temporary; Save dead zone persists attitudePID/deadzone independently of the P/I/D triple. Accepted half-width is 0..90 degrees; 0 disables the finite-width band. Editing keeps motors off; select a driving mode to test. The page displays the active half-width and robot confirmation. Invalid stored values fall back to 2 degrees.
 
-## Starting PWM
+## Upright calibration and wiring
 
-Forward/backward from STOP starts immediately at DRIVE_START_PWM (50), then follows the existing S curve to each wheel's target over DRIVE_RAMP_MS (currently 2000 ms). With target 254, the magnitude is 50 + (254 - 50) * t*t*(3 - 2*t). Backward uses negative logical values. Saved wheel trims still set the target and a target below 50 caps its starting magnitude. Repeated held commands do not reset the ramp. A direction change while already moving ramps from the currently applied PWM instead of jumping to 50. Turns and release-to-balance remain immediate.
+IMU calibration still keeps motors off. Capture/enter the upright angle and Save; first-use default 178 is overridden by saved imuCalib/upright after restart. Angle/Target/Tilt stay visible beside Wi-Fi. This sets the target, not gyro offsets. Motor inputs D0..D3; MPU SDA/SCL/INT D4/D5/D6; HC-SR04 Trig D10, Echo D7 through suitable 5 V to 3.3 V level shifting; common ground. Use an appropriate motor supply, not the XIAO 3V3 output.
 
-## Wireless upright calibration
+## Build and connect
 
-Select IMU calibration on the robot webpage. Entering this settings mode immediately disables motors, cancels movement ramps, and prevents balancing or driving. The live Angle/Target/Tilt display remains active. Hold the body in its intended upright posture, use Capture current angle to copy the current sensor reading (a single fresh snapshot, not a stability average), or enter an angle manually. Save upright angle updates the runtime target and writes it to ESP32 Preferences namespace imuCalib, key upright. Stay supported; capture and save do not prove correct mechanical posture.
+PlatformIO environment seeed_xiao_esp32c3, espressif32 6.12.0, Arduino ESP32 2.0.17; USB CDC enabled. Build/upload from this folder and select the board's current COM port. Serial is 115200 baud. Join XIAO-Robot (password robotdrive) and open http://192.168.4.1/. All webpage assets are embedded. Dependencies are pinned in platformio.ini. Support the robot when testing; do not upload until ready for controller behavior to change.
 
-On first use, DEFAULT_BALANCE_UPRIGHT_DEG is 178. Normal restart and firmware upload without flash erasure load the saved value. This calibrates only the balance upright target; it does not change gyro offsets or PID gains. Only explicit Save writes flash. Invalid/nonfinite/out-of-range angles, stale sensor readings, saves outside calibration mode, and unavailable storage are rejected. A storage write failure restores the previous runtime target and reports failure. Accepted angle range is 90..270 degrees in the pitch+180 convention. Calibration remains motors-off after Save; Remote drive resumes normal operation and stopped balancing with the saved target. STOP stays in calibration without arming; MOTORS OFF exits with output disabled. Disconnect exits to disabled manual mode.
+Automated tests use actual firmware functions mechanically translated into mocked hardware/time harnesses. They verify requests, saturation, lifecycle, parsing, persistence and webpage behavior, not physical dynamics or native RTOS timing.
 
-The driving rules, PWM 50 start, two-second S curve, immediate turns, and release-to-balance outside calibration are unchanged. test/calibration.cjs covers validation, storage failure rollback, first-use fallback and loading saved settings with mocked Preferences/motor hardware; actual flash retention still requires hardware testing.
+Source layout: `src/main.cpp` handles motion requests, modes, networking and stored settings; `src/balance.cpp` owns IMU sampling, PID and motor mixing (separate correction and output stages, with a shared PID reset); `include/robot_config.h` contains editable hardware/control values; `include/web_page.h` contains the offline page. Settings modes share a motor-disable guard, and all motion resets use one helper.
 
-## Compact control page
-
-Wi-Fi, Angle, Target, Tilt and balance status share the top status area. Only the current mode has a short description. Buttons are larger (104 px directional controls, at least 68 px other buttons). In distance mode, missing/invalid echo keeps the last forward/backward/left decision without restarting its ramp. With no previous motion it defaults to forward. Missing echo does not indicate a clear path; the robot continues without a distance measurement. STOP, MOTORS OFF and connection watchdogs remain available. Calibration and saved targets are unchanged.
+Final motor PWM dead zone: `MOTOR_PWM_DEAD_ZONE=50`. After mixing drive and PID correction and limiting to +/-255, each wheel output with magnitude below 50 becomes zero; exactly +/-50 passes. It applies in both driving modes and stopped attitude control. Wheel output telemetry shows the filtered values. The adjustable angle dead zone is separate.

@@ -24,7 +24,7 @@ const context=vm.createContext({assert,Number,parseDegrees(text,setTail){
   setTail(text.slice(match[0].length));return Number(match[0]);
 }});
 vm.runInContext(`
-var MANUAL=0,CALIBRATION=2,currentMode=MANUAL;
+var MANUAL=0,CALIBRATION=2,PID_TUNING=3,currentMode=MANUAL;
 var armed=false,ready=true,target=178,uprightAngle=178,output=0,motorPWM=0;
 var MIN_UPRIGHT_DEG=90,MAX_UPRIGHT_DEG=270,DEFAULT_BALANCE_UPRIGHT_DEG=178;
 var stateMutex=1,portMAX_DELAY=0,imuStorageReady=false,calibrationMessage='';
@@ -35,6 +35,7 @@ function xSemaphoreTake(){}function xSemaphoreGive(){}
 function isfinite(value){return Number.isFinite(value);}
 function balanceStatus(){return {ready,armed,target};}
 function stopAndManual(){currentMode=MANUAL;armed=false;motorsOff=true;}
+${extract(balance,'resetPIDLocked')}
 ${extract(balance,'balanceSetUpright')}
 ${extract(main,'loadUprightCalibration')}
 ${extract(main,'enterCalibration')}

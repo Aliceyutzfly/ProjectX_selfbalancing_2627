@@ -1,4 +1,4 @@
-// Upright PID and MPU6050 code, shown as an Arduino IDE sketch tab.
+// IMU sampling, PID correction and final motor output.
 #include <Arduino.h>
 #include <Wire.h>
 #include "src/lib/PID/PID_v1.h"
@@ -11,16 +11,20 @@
 #include "robot_config.h"
 #include "balance.h"
 
-// Internal helper declarations for Arduino IDE's sketch preprocessing.
+// Internal declarations for Arduino sketch preprocessing.
 void IRAM_ATTR dataReady();
+void resetPIDLocked();
 void disarmLocked(const char* reason);
 void sensorFault(const char* reason);
 bool readAngle();
+void updateAttitudeCorrection();
+void writeMixedMotorOutputs();
 void updateBalance(uint32_t now);
 void balanceTask(void* unused);
 
 
 MPU6050 mpu(BALANCE_IMU_ADDRESS);
+double deadZone = DEFAULT_DEAD_ZONE_DEG;
 double uprightAngle = DEFAULT_BALANCE_UPRIGHT_DEG;
 double input = uprightAngle, output = 0, target = uprightAngle;
 PID pid(&input, &output, &target, BALANCE_KP, BALANCE_KI, BALANCE_KD, DIRECT);
@@ -33,19 +37,30 @@ uint8_t fifoBuffer[64];
 uint32_t lastSample = 0;
 unsigned goodSamples = 0;
 int motorPWM = 0;
+int baseLeft = 0, baseRight = 0, actualLeft = 0, actualRight = 0;
+bool outputLimited = false;
+uint32_t lastDriveUpdate = 0;
 const char* message = "IMU not initialized";
 
 // Interrupt means new data is available, not that the body crossed a tilt limit.
 // Sensor reads and motor updates happen in the task, never inside this ISR.
 void IRAM_ATTR dataReady() { imuInterrupt = true; }
 
+// Caller holds the controller mutex (or runs before task startup).
+// Automatic mode reinitializes PID history when control resumes.
+void resetPIDLocked() {
+  pid.SetMode(MANUAL);
+  output = 0;
+  motorPWM = 0;
+}
+
 // Called with the mutex held. Faults latch motors OFF until an explicit re-arm.
 void disarmLocked(const char* reason) {
   armed = false;
   target = uprightAngle;
-  output = 0;
-  motorPWM = 0;
-  pid.SetMode(MANUAL);
+  resetPIDLocked();
+  baseLeft = baseRight = actualLeft = actualRight = 0;
+  outputLimited = false;
   if (motorWriter) motorWriter(0, 0);
   message = reason;
 }
@@ -111,26 +126,46 @@ bool readAngle() {
   return true;
 }
 
-// The teaching logic: measure angle -> compare with upright -> PID -> both wheels.
-void updateBalance(uint32_t now) {
-  if (fabs(input - uprightAngle) > BALANCE_TILT_LIMIT_DEG) {
-    disarmLocked("Tilt limit - support robot and press STOP");
+// Angle dead zone affects only attitude correction, never base driving.
+void updateAttitudeCorrection() {
+  target = uprightAngle;
+  if (fabs(input - target) <= deadZone) {
+    resetPIDLocked();
     return;
   }
-  // STOP always requests upright. Movement commands disable this controller.
-  target = uprightAngle;
-
+  pid.SetMode(AUTOMATIC);
   if (pid.Compute()) {
     motorPWM = constrain(int(lround(output * BALANCE_OUTPUT_SIGN)),
-                         -BALANCE_MAX_PWM, BALANCE_MAX_PWM);
-    // Both wheels receive the upright balance correction.
-    motorWriter(motorPWM, motorPWM);
+                         -ATTITUDE_MAX_PWM, ATTITUDE_MAX_PWM);
   }
-  message = "Balancing on STOP";
+}
+
+// Mix first, saturate second, then suppress small final wheel outputs.
+// Output-limited telemetry reports saturation; wheel telemetry includes filtering.
+void writeMixedMotorOutputs() {
+  const int mixedLeft = baseLeft + motorPWM;
+  const int mixedRight = baseRight + motorPWM;
+  actualLeft = constrain(mixedLeft, -BALANCE_MAX_PWM, BALANCE_MAX_PWM);
+  actualRight = constrain(mixedRight, -BALANCE_MAX_PWM, BALANCE_MAX_PWM);
+  outputLimited = actualLeft != mixedLeft || actualRight != mixedRight;
+  if (abs(actualLeft) < MOTOR_PWM_DEAD_ZONE) actualLeft = 0;
+  if (abs(actualRight) < MOTOR_PWM_DEAD_ZONE) actualRight = 0;
+  motorWriter(actualLeft, actualRight);
+}
+
+// Called only for a fresh IMU sample while the controller is enabled.
+void updateBalance(uint32_t now) {
+  if (now - lastDriveUpdate > CONTROL_TIMEOUT_MS) {
+    disarmLocked("Drive updates timed out - motors off");
+    return;
+  }
+  updateAttitudeCorrection();
+  writeMixedMotorOutputs();
+  message = "Drive plus attitude correction";
 }
 
 // One periodic task keeps balancing independent of HTTP and WebSocket waits.
-// A mutex prevents mode changes and this task writing the motors simultaneously.
+// The mutex serializes published requests, settings, and emergency shutdown.
 void balanceTask(void*) {
   TickType_t wakeTime = xTaskGetTickCount();
   uint32_t lastRun = millis(), lastPoll = 0;
@@ -182,7 +217,7 @@ bool balanceBegin(void (*writeMotors)(int, int)) {
     return false;
   }
   pid.SetSampleTime(BALANCE_PERIOD_MS);
-  pid.SetOutputLimits(-BALANCE_MAX_PWM, BALANCE_MAX_PWM);
+  pid.SetOutputLimits(-ATTITUDE_MAX_PWM, ATTITUDE_MAX_PWM);
   pid.SetMode(MANUAL);
   pinMode(MPU_INT, INPUT);
   attachInterrupt(digitalPinToInterrupt(MPU_INT), dataReady, RISING);
@@ -190,7 +225,7 @@ bool balanceBegin(void (*writeMotors)(int, int)) {
   mpu.setDMPEnabled(true);
   initialized = true;
   lastSample = millis();  // Give the first packet a full freshness interval.
-  message = "Ready - STOP enables upright balance";
+  message = "Ready - drive plus attitude correction";
   if (xTaskCreate(balanceTask, "balance", 6144, nullptr, 3, nullptr) != pdPASS) {
     initialized = false;
     detachInterrupt(digitalPinToInterrupt(MPU_INT));
@@ -208,17 +243,14 @@ bool balanceArm() {
   if (!initialized) { /* Preserve the initialization failure message. */ }
   else if (!angleValid || goodSamples < 10 || millis() - lastSample > 30)
     message = "Wait for fresh IMU readings, then press STOP";
-  else if (fabs(input - uprightAngle) > BALANCE_TILT_LIMIT_DEG)
-    message = "Hold within 20 degrees of upright to arm";
   else if (armed) { accepted = true; }
   else {
     target = uprightAngle;
-    output = 0;
-    motorPWM = 0;
-    pid.SetMode(MANUAL);
+    resetPIDLocked();
     pid.SetMode(AUTOMATIC);  // Reset accumulated correction on every explicit arm.
+    lastDriveUpdate = millis();
     armed = true;
-    message = "Balancing on STOP";
+    message = "Drive plus attitude correction";
     accepted = true;
   }
   xSemaphoreGive(stateMutex);
@@ -228,23 +260,28 @@ bool balanceArm() {
 void balanceDisarm() {
   if (!stateMutex) { if (motorWriter) motorWriter(0, 0); return; }
   xSemaphoreTake(stateMutex, portMAX_DELAY);
-  disarmLocked(initialized ? "Balance off - motors stopped" : message);
+  disarmLocked(initialized ? "Controller off - motors stopped" : message);
   xSemaphoreGive(stateMutex);
 }
 
 BalanceStatus balanceStatus() {
   if (stateMutex) xSemaphoreTake(stateMutex, portMAX_DELAY);
   BalanceStatus state {initialized && angleValid && goodSamples >= 10 && millis() - lastSample <= 30,
-                       armed, angleValid, input, target, motorPWM, message};
+                       armed, angleValid, input, target, motorPWM, message,
+                       baseLeft, baseRight, actualLeft, actualRight, outputLimited,
+                       pid.GetKp(), pid.GetKi(), pid.GetKd(), deadZone};
   if (stateMutex) xSemaphoreGive(stateMutex);
   return state;
 }
 
-void balanceWriteManual(int left, int right) {
-  if (!motorWriter) return;
-  if (stateMutex) xSemaphoreTake(stateMutex, portMAX_DELAY);
-  if (!armed) motorWriter(left, right);
-  if (stateMutex) xSemaphoreGive(stateMutex);
+// Publishing a request never writes a motor or enables the controller.
+void balanceSetDrive(int left, int right) {
+  if (!stateMutex) return;
+  xSemaphoreTake(stateMutex, portMAX_DELAY);
+  baseLeft = constrain(left, -BALANCE_MAX_PWM, BALANCE_MAX_PWM);
+  baseRight = constrain(right, -BALANCE_MAX_PWM, BALANCE_MAX_PWM);
+  lastDriveUpdate = millis();
+  xSemaphoreGive(stateMutex);
 }
 
 bool balanceSetUpright(double degrees) {
@@ -253,9 +290,36 @@ bool balanceSetUpright(double degrees) {
   const bool accepted = !armed;
   if (accepted) {
     uprightAngle = target = degrees;
-    output = 0;
-    motorPWM = 0;
-    pid.SetMode(MANUAL);
+    resetPIDLocked();
+  }
+  if (stateMutex) xSemaphoreGive(stateMutex);
+  return accepted;
+}
+
+bool balanceValidTunings(double kp, double ki, double kd) {
+  return isfinite(kp) && isfinite(ki) && isfinite(kd) &&
+         kp >= 0 && kp <= PID_MAX_KP && ki >= 0 && ki <= PID_MAX_KI && kd >= 0 && kd <= PID_MAX_KD;
+}
+
+bool balanceSetTunings(double kp, double ki, double kd) {
+  if (!balanceValidTunings(kp, ki, kd)) return false;
+  if (stateMutex) xSemaphoreTake(stateMutex, portMAX_DELAY);
+  const bool accepted = !armed;
+  if (accepted) {
+    resetPIDLocked();
+    pid.SetTunings(kp, ki, kd);
+  }
+  if (stateMutex) xSemaphoreGive(stateMutex);
+  return accepted;
+}
+
+bool balanceSetDeadZone(double degrees) {
+  if (!isfinite(degrees) || degrees < 0 || degrees > MAX_DEAD_ZONE_DEG) return false;
+  if (stateMutex) xSemaphoreTake(stateMutex, portMAX_DELAY);
+  const bool accepted = !armed;
+  if (accepted) {
+    deadZone = degrees;
+    resetPIDLocked();
   }
   if (stateMutex) xSemaphoreGive(stateMutex);
   return accepted;

@@ -1,10 +1,5 @@
-// Open this sketch in Arduino IDE. Main controls are in this tab;
-// upright PID/IMU code is in Balance.ino; editable settings are in robot_config.h.
-// All third-party libraries compile automatically from src/lib.
-// Libraries: Arduino handles pins/timing; WiFi creates the network;
-// WebServer serves the page; WebSockets carries live commands/status;
-// Preferences saves wheel trims in flash. The two local headers hold
-// hardware settings and the complete offline control page.
+// Open this sketch in Arduino IDE. Application: this tab; IMU/PID: Balance.ino.
+// Edit robot_config.h for wiring and control settings. Libraries are bundled in src/lib.
 #include <Arduino.h>
 #include <math.h>
 #include <stdlib.h>
@@ -17,88 +12,140 @@
 #include "balance.h"
 #include "robot_types.h"
 
-// Declarations used by Arduino IDE's .ino build.
+// Explicit declarations for Arduino sketch preprocessing.
+bool isSettingsMode();
+const char* modeName();
 void moveMotor(int left, int right);
+void clearDriveRequest();
 void stopMotors();
 void stopAndManual();
-void serviceIdleBalance();
-const char* modeName();
-String statusJSON();
+void serviceController();
 void requestMotion(Motion motion);
-bool drive(const String& command);
 void updateDriveMotion(uint32_t now);
+bool drive(const String& command);
 void requestUserStop();
-void loadUprightCalibration();
-void enterCalibration();
-void saveUprightCalibration(const String& value);
-void webSocketEvent(uint8_t client, WStype_t type, uint8_t* payload, size_t length);
 void sampleDistance(uint32_t now);
 void handleDistanceMode();
 void checkControlTimeouts(uint32_t now);
 void serialCalibration();
+void loadUprightCalibration();
+void enterCalibration();
+void saveUprightCalibration(const String& value);
+void loadPIDSettings();
+bool parsePIDValues(const String& value, double gains[3]);
+void updatePIDSettings(const String& value, bool save);
+void updateDeadZone(const String& value, bool save);
+String statusJSON();
+void handleCommand(const String& command);
+void webSocketEvent(uint8_t client, WStype_t type, uint8_t* payload, size_t length);
+void setup();
+void loop();
 
+// Modes
 
 Mode currentMode = REMOTE_MODE;
 
-// Create persistent-storage and network-server objects once.
-// HTTP port 80 loads the page; WebSocket port 81 keeps controls responsive.
+// Storage and network objects
+
 Preferences prefs;
 Preferences imuPrefs;
-bool imuStorageReady = false;
-const char* calibrationMessage = "Hold upright, capture or enter an angle, then save";
+Preferences pidPrefs;
 WebServer httpServer(80);
 WebSocketsServer wsServer(81);
 
-// Shared runtime values. PWM magnitude is 0..255; each wheel has its
-// own trim because two nominally identical motors may run at different speeds.
+// Movement state
+
+// Independent wheel trims; saved values override these startup defaults.
 int leftPWM = 254, rightPWM = 254;
-int controller = -1;  // One controlling browser at a time.
-// millis() timestamps are milliseconds since boot. Subtract unsigned
-// timestamps rather than comparing absolute deadlines, so wraparound works.
-uint32_t lastHeartbeat = 0, lastDrive = 0, lastSensor = 0, lastStatus = 0;
-float distanceCM = -1;
-bool distanceValid = false;
-// Both modes share one movement function and one ramp state.
 Motion requestedMotion = STOPPED;
 bool rampActive = false;
-// Initially idle: start balancing when fresh data and upright posture allow it.
-// Safety stops cancel this request; a normal STOP enables it again.
-bool idleBalanceRequested = true, idleBalanceAttempted = false;
-uint32_t rampStarted = 0, rampDuration = 0;
+// Startup waits for fresh IMU data. Faults require an explicit new enable request.
+bool armPending = true;
+uint32_t rampStarted = 0;
 int rampStartLeft = 0, rampStartRight = 0;
 int targetLeft = 0, targetRight = 0;
 int appliedLeft = 0, appliedRight = 0;
 const char* activity = "Stopped";
 
-// Low-level wheel control. Positive = logical forward; negative =
-// reverse; zero = no drive. The magnitude sets PWM duty cycle.
-// Each DRV8833 bridge uses two inputs: PWM/0 forward, 0/PWM reverse.
-// Inversion flags compensate for wheel mounting or motor-lead polarity.
+// Connection, timing and sensor state
+
+// -1 means no browser owns control.
+int controller = -1;
+// Unsigned elapsed-time subtraction handles millis() wraparound.
+uint32_t lastHeartbeat = 0, lastDrive = 0, lastSensor = 0, lastStatus = 0;
+float distanceCM = -1;
+bool distanceValid = false;
+
+// Stored settings and browser feedback
+
+bool imuStorageReady = false;
+const char* calibrationMessage = "Hold upright, capture or enter an angle, then save";
+bool pidStorageReady = false;
+// Revision counters advance on Apply/Save, including rejected requests.
+uint32_t pidUpdate = 0;
+const char* pidMessage = "Apply tests gains; Save also retains them after restart";
+uint32_t deadZoneUpdate = 0;
+const char* deadZoneMessage = "Apply is temporary; Save remembers the dead zone";
+
+// Mode helpers
+
+// Settings pages never enable the motor controller.
+bool isSettingsMode() {
+  return currentMode == CALIBRATION_MODE || currentMode == PID_TUNING_MODE;
+}
+
+const char* modeName() {
+  if (currentMode == PID_TUNING_MODE)
+    return "PID_TUNING";
+  if (currentMode == CALIBRATION_MODE)
+    return "CALIBRATION";
+  return currentMode == REMOTE_MODE ? "MANUAL" : "DISTANCE";
+}
+
+// Motor output
+
+// Positive PWM is logical forward; negative is reverse. Clear the opposite
+// DRV8833 input before applying PWM. This callback is owned by the IMU task.
 void moveMotor(int left, int right) {
   left = constrain(left, -255, 255);
   right = constrain(right, -255, 255);
-  if (INVERT_LEFT) left = -left;
-  if (INVERT_RIGHT) right = -right;
+  if (INVERT_LEFT)
+    left = -left;
+  if (INVERT_RIGHT)
+    right = -right;
   // Clear the opposite leg first when changing direction.
-  if (left >= 0) { analogWrite(MOTOR_IN2, 0); analogWrite(MOTOR_IN1, left); }
-  else { analogWrite(MOTOR_IN1, 0); analogWrite(MOTOR_IN2, -left); }
-  if (right >= 0) { analogWrite(MOTOR_IN4, 0); analogWrite(MOTOR_IN3, right); }
-  else { analogWrite(MOTOR_IN3, 0); analogWrite(MOTOR_IN4, -right); }
+  if (left >= 0) {
+    analogWrite(MOTOR_IN2, 0);
+    analogWrite(MOTOR_IN1, left);
+  } else {
+    analogWrite(MOTOR_IN1, 0);
+    analogWrite(MOTOR_IN2, -left);
+  }
+  if (right >= 0) {
+    analogWrite(MOTOR_IN4, 0);
+    analogWrite(MOTOR_IN3, right);
+  } else {
+    analogWrite(MOTOR_IN3, 0);
+    analogWrite(MOTOR_IN4, -right);
+  }
 }
 
+// Movement requests and acceleration
 
-// Immediate motor-off for faults, mode changes, and lost control.
-// Cancelling the ramp prevents the next loop from restarting the motors.
-void stopMotors() {
+// Cancel both the current request and any unfinished ramp.
+void clearDriveRequest() {
   rampActive = false;
   requestedMotion = STOPPED;
   rampStartLeft = rampStartRight = 0;
   targetLeft = targetRight = 0;
   appliedLeft = appliedRight = 0;
+}
+
+// Immediate shutdown: faults, connection loss and emergency stop.
+void stopMotors() {
+  clearDriveRequest();
   balanceDisarm();
-  balanceWriteManual(0, 0);
-  idleBalanceRequested = false;
-  idleBalanceAttempted = true;
+  armPending = false;
   activity = "Stopped";
 }
 
@@ -107,230 +154,124 @@ void stopAndManual() {
   currentMode = REMOTE_MODE;
 }
 
-// Enable upright PID as soon as a release/STOP cancels driving. Wait for a
-// usable IMU and posture; after a successful attempt, faults never auto-rearm.
-void serviceIdleBalance() {
-  if (currentMode == CALIBRATION_MODE || !idleBalanceRequested || idleBalanceAttempted || rampActive ||
-      requestedMotion != STOPPED) return;
+// Publish base wheel requests. Try enabling once, when fresh IMU data is ready.
+void serviceController() {
+  balanceSetDrive(appliedLeft, appliedRight);
+  if (isSettingsMode() || !armPending)
+    return;
   const BalanceStatus state = balanceStatus();
-  if (!state.ready || fabs(state.angle - state.target) > BALANCE_TILT_LIMIT_DEG) return;
-  idleBalanceAttempted = true;
+  if (!state.ready)
+    return;
+  armPending = false;
   balanceArm();
 }
 
-const char* modeName() {
-  if (currentMode == CALIBRATION_MODE) return "CALIBRATION";
-  return currentMode == REMOTE_MODE ? "MANUAL" : "DISTANCE";
-}
-
-// JSON null means the sensor has no valid reading.
-String statusJSON() {
-  String json = "{\"mode\":\"";
-  json += modeName();
-  json += "\",\"distance_cm\":";
-  json += distanceValid ? String(distanceCM, 1) : String("null");
-  json += ",\"activity\":\"";
-  const BalanceStatus balance = balanceStatus();
-  json += balance.armed ? balance.message : activity;
-  json += "\",\"balance_active\":";
-  json += balance.armed ? "true" : "false";
-  json += ",\"balance_ready\":";
-  json += balance.ready ? "true" : "false";
-  json += ",\"balance_pending\":";
-  json += idleBalanceRequested && !idleBalanceAttempted ? "true" : "false";
-  json += ",\"angle_deg\":";
-  json += balance.angleValid ? String(balance.angle, 2) : String("null");
-  json += ",\"target_deg\":";
-  json += String(balance.target, 2);
-  json += ",\"tilt_deg\":";
-  json += balance.angleValid ? String(balance.angle - balance.target, 2) : String("null");
-  json += ",\"balance_pwm\":";
-  json += String(balance.pwm);
-  json += ",\"balance_message\":\"";
-  json += balance.message;
-  json += "\",\"calibration_message\":\"";
-  json += calibrationMessage;
-  json += "\"}";
-  return json;
-}
-
-// Shared by both modes: turns apply immediately, forward/backward ramp,
-// and release/STOP hands control directly to upright balancing.
+// Both driving modes share this path: immediate turns, S-ramped forward/reverse.
+// Repeated held commands must not reset a ramp or restart a faulted controller.
 void requestMotion(Motion motion) {
-  if (currentMode == CALIBRATION_MODE) return;
+  if (isSettingsMode())
+    return;
   if (motion == STOPPED) {
-    if (balanceStatus().armed) return; // Repeated releases must not reset PID.
-    stopMotors(); // Cancel any drive ramp/output before handing over ownership.
-    idleBalanceRequested = true;
-    idleBalanceAttempted = false;
-    serviceIdleBalance(); // Starts now if IMU/posture allow it; otherwise waits off.
+    clearDriveRequest();
+    activity = "Stopped";
+    if (!balanceStatus().armed)
+      armPending = true;
+    serviceController(); // Zero base drive, without resetting active attitude PID.
     return;
   }
-  if (motion == requestedMotion) return; // Held commands never restart a ramp.
-  if (motion != STOPPED && idleBalanceRequested) {
-    balanceDisarm(); // Release PID ownership before ordinary motor control.
-    idleBalanceRequested = false;
-    idleBalanceAttempted = true;
-  }
+  if (motion == requestedMotion)
+    return; // Repeats never reset ramps or a fault latch.
   const bool startingFromStop = requestedMotion == STOPPED;
   requestedMotion = motion;
-  if (motion == FORWARD) { targetLeft = leftPWM; targetRight = rightPWM; activity = "Forward"; }
-  else if (motion == BACKWARD) { targetLeft = -leftPWM; targetRight = -rightPWM; activity = "Reverse"; }
-  else if (motion == TURN_LEFT) { targetLeft = -leftPWM; targetRight = rightPWM; activity = "Turn left"; }
-  else if (motion == TURN_RIGHT) { targetLeft = leftPWM; targetRight = -rightPWM; activity = "Turn right"; }
+  if (!balanceStatus().armed)
+    armPending = true;
+  if (motion == FORWARD) {
+    targetLeft = leftPWM;
+    targetRight = rightPWM;
+    activity = "Forward";
+  } else if (motion == BACKWARD) {
+    targetLeft = -leftPWM;
+    targetRight = -rightPWM;
+    activity = "Reverse";
+  } else if (motion == TURN_LEFT) {
+    targetLeft = -leftPWM;
+    targetRight = rightPWM;
+    activity = "Turn left";
+  } else if (motion == TURN_RIGHT) {
+    targetLeft = leftPWM;
+    targetRight = -rightPWM;
+    activity = "Turn right";
+  }
 
   if (motion == TURN_LEFT || motion == TURN_RIGHT) {
     rampActive = false;
     appliedLeft = targetLeft;
     appliedRight = targetRight;
-    balanceWriteManual(appliedLeft, appliedRight);
-    return;
+  } else {
+    if (startingFromStop) {
+      const int direction = motion == FORWARD ? 1 : -1;
+      appliedLeft = direction * min(DRIVE_START_PWM, leftPWM);
+      appliedRight = direction * min(DRIVE_START_PWM, rightPWM);
+    }
+    rampStartLeft = appliedLeft;
+    rampStartRight = appliedRight;
+    rampStarted = millis();
+    rampActive = true;
   }
-  if (startingFromStop) {
-    // Start forward/backward with useful drive, then S-ramp to each wheel's trim.
-    // A lower saved trim must never be exceeded by the starting PWM.
-    const int direction = motion == FORWARD ? 1 : -1;
-    appliedLeft = direction * min(DRIVE_START_PWM, leftPWM);
-    appliedRight = direction * min(DRIVE_START_PWM, rightPWM);
-    balanceWriteManual(appliedLeft, appliedRight);
-  }
-  rampStartLeft = appliedLeft;
-  rampStartRight = appliedRight;
-  rampStarted = millis();
-  rampDuration = DRIVE_RAMP_MS;
-  rampActive = true;
+  serviceController();
 }
 
-// Named commands are accepted only by the manual WebSocket handler.
-bool drive(const String& command) {
-  if (command == "forward") requestMotion(FORWARD);
-  else if (command == "backward") requestMotion(BACKWARD);
-  else if (command == "turnLeft") requestMotion(TURN_LEFT);
-  else if (command == "turnRight") requestMotion(TURN_RIGHT);
-  else return false;
-  return true;
-}
-
-// Smoothstep: gentle at both ends, faster in the middle. This shapes PWM;
-// actual wheel acceleration also depends on the motors, power, and load.
+// Smoothstep shapes requested PWM; physical acceleration also depends on the load.
 void updateDriveMotion(uint32_t now) {
-  if (!rampActive) return;
+  if (!rampActive)
+    return;
   const uint32_t elapsed = now - rampStarted;
-  const float t = elapsed >= rampDuration ? 1.0f : float(elapsed) / float(rampDuration);
+  const float t = elapsed >= DRIVE_RAMP_MS ? 1.0f : float(elapsed) / float(DRIVE_RAMP_MS);
   const float fraction = t * t * (3.0f - 2.0f * t);
   const int left = rampStartLeft + int(lroundf((targetLeft - rampStartLeft) * fraction));
   const int right = rampStartRight + int(lroundf((targetRight - rampStartRight) * fraction));
   if (left != appliedLeft || right != appliedRight) {
     appliedLeft = left;
     appliedRight = right;
-    balanceWriteManual(left, right);
+    balanceSetDrive(left, right);
   }
-  if (elapsed >= rampDuration) {
+  if (elapsed >= DRIVE_RAMP_MS) {
     rampActive = false;
   }
 }
 
-// Button release/STOP exits autonomy and starts balancing without a slowdown.
+// Decode direction commands; the command handler enforces manual mode.
+bool drive(const String& command) {
+  if (command == "forward")
+    requestMotion(FORWARD);
+  else if (command == "backward")
+    requestMotion(BACKWARD);
+  else if (command == "turnLeft")
+    requestMotion(TURN_LEFT);
+  else if (command == "turnRight")
+    requestMotion(TURN_RIGHT);
+  else
+    return false;
+  return true;
+}
+
+// STOP exits distance mode and zeros base drive. Attitude correction stays active;
+// settings pages remain disabled.
 void requestUserStop() {
-  if (currentMode == CALIBRATION_MODE) { stopMotors(); return; }
+  if (isSettingsMode()) {
+    stopMotors();
+    return;
+  }
   currentMode = REMOTE_MODE;
   requestMotion(STOPPED);
 }
 
-// A separate namespace keeps upright calibration independent of wheel trims.
-void loadUprightCalibration() {
-  imuStorageReady = imuPrefs.begin("imuCalib", false);
-  const double saved = imuStorageReady ?
-    imuPrefs.getDouble("upright", DEFAULT_BALANCE_UPRIGHT_DEG) : DEFAULT_BALANCE_UPRIGHT_DEG;
-  if (!balanceSetUpright(saved)) balanceSetUpright(DEFAULT_BALANCE_UPRIGHT_DEG);
-  if (!imuStorageReady) calibrationMessage = "Calibration storage unavailable - using default";
-}
+// Obstacle sensing and distance mode
 
-void enterCalibration() {
-  stopAndManual(); // Cancels ramps and PID before enabling the settings page.
-  currentMode = CALIBRATION_MODE;
-  calibrationMessage = "Hold the body at its intended upright position, then capture and save";
-}
-
-void saveUprightCalibration(const String& value) {
-  if (currentMode != CALIBRATION_MODE) return;
-  const char* start = value.c_str();
-  char* end = nullptr;
-  const double degrees = strtod(start, &end);
-  if (end == start || *end != '\0' || !isfinite(degrees) ||
-      degrees < MIN_UPRIGHT_DEG || degrees > MAX_UPRIGHT_DEG) {
-    calibrationMessage = "Enter a valid angle from 90 to 270 degrees";
-    return;
-  }
-  const BalanceStatus state = balanceStatus();
-  if (!state.ready || state.armed) {
-    calibrationMessage = "Cannot save - fresh IMU readings and motors off are required";
-    return;
-  }
-  if (!imuStorageReady) { calibrationMessage = "Cannot save - calibration storage unavailable"; return; }
-  const double previous = state.target;
-  if (!balanceSetUpright(degrees)) { calibrationMessage = "Cannot update upright angle"; return; }
-  if (imuPrefs.putDouble("upright", degrees) != sizeof(double)) {
-    balanceSetUpright(previous); // Do not claim success when flash storage failed.
-    calibrationMessage = "Save failed - previous upright angle restored";
-    return;
-  }
-  calibrationMessage = "Upright angle saved - retained after restart; motors remain off";
-}
-
-// WebSocket callback: runs when a browser connects, disconnects,
-// or sends a message. Only the accepted controller may issue commands.
-void webSocketEvent(uint8_t client, WStype_t type, uint8_t* payload, size_t length) {
-  // Accept one controller, reset to a stopped state, then send its first status.
-  if (type == WStype_CONNECTED) {
-    if (controller >= 0) { wsServer.disconnect(client); return; }
-    // Initial connection may arrive while the initially stopped robot balances.
-    // Reconnect after a safety stop preserves its disabled state.
-    if (requestedMotion != STOPPED || rampActive) stopAndManual();
-    controller = client;
-    lastHeartbeat = millis();
-    String state = statusJSON();
-    wsServer.sendTXT(client, state);
-    return;
-  }
-  if (client != controller) return;
-  // Disconnect immediately stops motion and returns to manual mode.
-  if (type == WStype_DISCONNECTED) {
-    controller = -1;
-    stopAndManual();
-    return;
-  }
-  if (type != WStype_TEXT) return;
-  // Copy only the supplied bytes; do not assume a NUL-terminated payload.
-  if (length == 0 || length > 32) { stopAndManual(); return; }
-  String command;
-  command.reserve(length);
-  for (size_t i = 0; i < length; ++i) command += static_cast<char>(payload[i]); // Copy the data received from the WebSocket into a String.
-
-  // Release/STOP requests balance immediately; motor-off disables everything.
-  if (command == "stop") requestUserStop();
-  else if (command == "heartbeat") lastHeartbeat = millis();
-  else if (command == "motors:off") stopAndManual();
-  else if (command == "mode:calibration") enterCalibration();
-  else if (command.startsWith("imu:save:")) saveUprightCalibration(command.substring(9));
-  else if (command == "mode:manual" || command == "mode:distance") {
-    stopAndManual();
-    if (command == "mode:distance") {
-      currentMode = DISTANCE_MODE;
-      distanceValid = false;
-      lastSensor = millis() - SENSOR_INTERVAL_MS;
-      activity = "Checking distance";
-    } else requestUserStop();
-  } else if (currentMode == REMOTE_MODE && drive(command)) {
-    lastDrive = millis();
-  } else if (currentMode == REMOTE_MODE) stopMotors();
-  String state = statusJSON(); // Calls statusJSON() to build the robot’s status message, then stores that text in a variable called state.
-  if (command != "heartbeat") wsServer.sendTXT(client, state);
-}
-
-// Read the ultrasonic sensor at the configured interval.
+// Measure at the configured interval; the IMU task continues during the Echo wait.
 void sampleDistance(uint32_t now) {
-  if (now - lastSensor < SENSOR_INTERVAL_MS) return;
+  if (now - lastSensor < SENSOR_INTERVAL_MS)
+    return;
   lastSensor = now;
   digitalWrite(PIN_TRIG, LOW);
   delayMicroseconds(2);
@@ -338,25 +279,31 @@ void sampleDistance(uint32_t now) {
   delayMicroseconds(10);
   digitalWrite(PIN_TRIG, LOW);
   const uint32_t duration = pulseInLong(PIN_ECHO, HIGH, ECHO_TIMEOUT_US);
-  //Trig pulse → sensor sends ultrasound → Echo goes HIGH → reflected sound returns → Echo goes LOW
+  // Echo pulse duration is the sound round-trip time.
   distanceCM = duration * 0.0343f / 2.0f;
   distanceValid = duration != 0 && distanceCM >= 2.0f && distanceCM <= 400.0f;
 }
 
-// Distance rules include exact boundaries: 5..20 cm turns left.
-// No echo keeps the last motion; before any movement, default to forward.
+// Above 20 cm: forward. Below 5 cm: reverse. Otherwise: left.
+// No echo preserves the last request, or starts forward if stopped.
 void handleDistanceMode() {
   if (!distanceValid) {
     // Do not restart an existing ramp or replace the last distance decision.
-    if (requestedMotion == STOPPED) requestMotion(FORWARD);
+    if (requestedMotion == STOPPED)
+      requestMotion(FORWARD);
     return;
   }
-  if (distanceCM > FORWARD_DISTANCE_CM) requestMotion(FORWARD);
-  else if (distanceCM < REVERSE_DISTANCE_CM) requestMotion(BACKWARD);
-  else requestMotion(TURN_LEFT);
+  if (distanceCM > FORWARD_DISTANCE_CM)
+    requestMotion(FORWARD);
+  else if (distanceCM < REVERSE_DISTANCE_CM)
+    requestMotion(BACKWARD);
+  else
+    requestMotion(TURN_LEFT);
 }
 
-// Lost heartbeat closes the browser session and immediately stops motion.
+// Control timeouts
+
+// Lost heartbeat or stale held commands disable both drive and attitude correction.
 void checkControlTimeouts(uint32_t now) {
   if (controller >= 0 && now - lastHeartbeat > CONTROL_TIMEOUT_MS) {
     const int expiredClient = controller;
@@ -366,27 +313,42 @@ void checkControlTimeouts(uint32_t now) {
   }
   // Held movement commands need refreshing only in remote mode.
   // Connection/command failure disables drive and balance immediately.
-  if (currentMode == REMOTE_MODE && requestedMotion != STOPPED &&
-      now - lastDrive > CONTROL_TIMEOUT_MS) stopMotors();
-  if (controller < 0 && (requestedMotion != STOPPED || rampActive)) stopAndManual();
+  if (currentMode == REMOTE_MODE && requestedMotion != STOPPED && now - lastDrive > CONTROL_TIMEOUT_MS)
+    stopMotors();
+  if (controller < 0 && (requestedMotion != STOPPED || rampActive))
+    stopAndManual();
 }
 
-// Optional USB Serial wheel trim. L/R increase a wheel PWM; l/r
-// decrease it; S saves both trims in flash. Changing a trim cancels motion.
+// Wheel trim and upright calibration
+
+// USB wheel trim: L/R increase, l/r decrease, S saves. Adjustments stop motion.
 void serialCalibration() {
-  if (!Serial.available()) return;
+  if (!Serial.available())
+    return;
   const char c = Serial.read();
   bool changed = false;
   switch (c) {
-    case 'L': ++leftPWM; changed = true; break;
-    case 'l': --leftPWM; changed = true; break;
-    case 'R': ++rightPWM; changed = true; break;
-    case 'r': --rightPWM; changed = true; break;
-    case 'S':
-      prefs.putInt("leftPWM", leftPWM);
-      prefs.putInt("rightPWM", rightPWM);
-      Serial.println("Calibration saved.");
-      break;
+  case 'L':
+    ++leftPWM;
+    changed = true;
+    break;
+  case 'l':
+    --leftPWM;
+    changed = true;
+    break;
+  case 'R':
+    ++rightPWM;
+    changed = true;
+    break;
+  case 'r':
+    --rightPWM;
+    changed = true;
+    break;
+  case 'S':
+    prefs.putInt("leftPWM", leftPWM);
+    prefs.putInt("rightPWM", rightPWM);
+    Serial.println("Calibration saved.");
+    break;
   }
   if (changed) {
     leftPWM = constrain(leftPWM, 0, 255);
@@ -396,31 +358,308 @@ void serialCalibration() {
   }
 }
 
+// The saved upright target is independent of the wheel trims and MPU offsets.
+void loadUprightCalibration() {
+  imuStorageReady = imuPrefs.begin("imuCalib", false);
+  const double saved = imuStorageReady ? imuPrefs.getDouble("upright", DEFAULT_BALANCE_UPRIGHT_DEG)
+                                       : DEFAULT_BALANCE_UPRIGHT_DEG;
+  if (!balanceSetUpright(saved))
+    balanceSetUpright(DEFAULT_BALANCE_UPRIGHT_DEG);
+  if (!imuStorageReady)
+    calibrationMessage = "Calibration storage unavailable - using default";
+}
 
+void enterCalibration() {
+  stopAndManual(); // Cancels ramps and PID before enabling the settings page.
+  currentMode = CALIBRATION_MODE;
+  calibrationMessage = "Hold the body at its intended upright position, then capture and save";
+}
+
+void saveUprightCalibration(const String& value) {
+  if (currentMode != CALIBRATION_MODE)
+    return;
+  const char* start = value.c_str();
+  char* end = nullptr;
+  const double degrees = strtod(start, &end);
+  if (end == start || *end != '\0' || !isfinite(degrees) || degrees < MIN_UPRIGHT_DEG ||
+      degrees > MAX_UPRIGHT_DEG) {
+    calibrationMessage = "Enter a valid angle from 90 to 270 degrees";
+    return;
+  }
+  const BalanceStatus state = balanceStatus();
+  if (!state.ready || state.armed) {
+    calibrationMessage = "Cannot save - fresh IMU readings and motors off are required";
+    return;
+  }
+  if (!imuStorageReady) {
+    calibrationMessage = "Cannot save - calibration storage unavailable";
+    return;
+  }
+  const double previous = state.target;
+  if (!balanceSetUpright(degrees)) {
+    calibrationMessage = "Cannot update upright angle";
+    return;
+  }
+  if (imuPrefs.putDouble("upright", degrees) != sizeof(double)) {
+    balanceSetUpright(previous); // Do not claim success when flash storage failed.
+    calibrationMessage = "Save failed - previous upright angle restored";
+    return;
+  }
+  calibrationMessage = "Upright angle saved - retained after restart; motors remain off";
+}
+
+// PID and angle dead-zone settings
+
+// Store the gain triple together; the angle dead zone has its own saved value.
+void loadPIDSettings() {
+  pidStorageReady = pidPrefs.begin("attitudePID", false);
+  double gains[3] = {BALANCE_KP, BALANCE_KI, BALANCE_KD};
+  if (pidStorageReady && pidPrefs.getBytesLength("gains") == sizeof(gains)) {
+    double saved[3];
+    if (pidPrefs.getBytes("gains", saved, sizeof(saved)) == sizeof(saved) &&
+        balanceValidTunings(saved[0], saved[1], saved[2])) {
+      for (size_t i = 0; i < 3; ++i)
+        gains[i] = saved[i];
+    }
+  }
+  balanceSetTunings(gains[0], gains[1], gains[2]);
+  const double savedZone = pidStorageReady ? pidPrefs.getDouble("deadzone", DEFAULT_DEAD_ZONE_DEG)
+                                           : DEFAULT_DEAD_ZONE_DEG;
+  if (!balanceSetDeadZone(savedZone))
+    balanceSetDeadZone(DEFAULT_DEAD_ZONE_DEG);
+}
+
+bool parsePIDValues(const String& value, double gains[3]) {
+  const char* start = value.c_str();
+  for (size_t i = 0; i < 3; ++i) {
+    char* end = nullptr;
+    gains[i] = strtod(start, &end);
+    if (end == start || (i < 2 && *end != ',') || (i == 2 && *end != '\0'))
+      return false;
+    start = end + 1;
+  }
+  return balanceValidTunings(gains[0], gains[1], gains[2]);
+}
+
+// Apply changes RAM; Save also writes flash. Failed saves restore runtime values.
+void updatePIDSettings(const String& value, bool save) {
+  ++pidUpdate;
+  double gains[3];
+  if (!parsePIDValues(value, gains)) {
+    pidMessage = "Invalid PID: P 0..200, I 0..500, D 0..50";
+    return;
+  }
+  if (save && !pidStorageReady) {
+    pidMessage = "Cannot save PID - storage unavailable";
+    return;
+  }
+  const BalanceStatus previous = balanceStatus();
+  const bool editingSettings = isSettingsMode();
+  stopMotors(); // Settings apply with output OFF, and never restart automatically.
+  if (!editingSettings)
+    currentMode = REMOTE_MODE;
+  if (!balanceSetTunings(gains[0], gains[1], gains[2])) {
+    pidMessage = "Cannot apply PID gains";
+    return;
+  }
+  if (save && pidPrefs.putBytes("gains", gains, sizeof(gains)) != sizeof(gains)) {
+    balanceSetTunings(previous.kp, previous.ki, previous.kd);
+    pidMessage = "PID save failed - previous gains restored";
+    return;
+  }
+  pidMessage = save ? "PID saved - select Remote drive to resume"
+                    : "PID applied for this session - select Remote drive to resume";
+}
+
+void updateDeadZone(const String& value, bool save) {
+  ++deadZoneUpdate;
+  if (currentMode != PID_TUNING_MODE) {
+    deadZoneMessage = "Cannot edit dead zone outside PID settings";
+    return;
+  }
+  const char* start = value.c_str();
+  char* end = nullptr;
+  const double degrees = strtod(start, &end);
+  if (end == start || *end != '\0' || !isfinite(degrees) || degrees < 0 ||
+      degrees > MAX_DEAD_ZONE_DEG) {
+    deadZoneMessage = "Invalid dead zone - enter 0 to 90 degrees";
+    return;
+  }
+  if (save && !pidStorageReady) {
+    deadZoneMessage = "Cannot save dead zone - storage unavailable";
+    return;
+  }
+  stopMotors();
+  const double previous = balanceStatus().deadZone;
+  if (!balanceSetDeadZone(degrees)) {
+    deadZoneMessage = "Cannot apply dead zone";
+    return;
+  }
+  if (save && pidPrefs.putDouble("deadzone", degrees) != sizeof(double)) {
+    balanceSetDeadZone(previous);
+    deadZoneMessage = "Dead zone save failed - previous value restored";
+    return;
+  }
+  deadZoneMessage = save ? "Dead zone saved - select Remote drive to test"
+                         : "Dead zone applied for this session - select Remote drive to test";
+}
+
+// Browser telemetry
+
+// Values passed to add() are JSON literals; text() quotes fixed message strings.
+String statusJSON() {
+  const BalanceStatus state = balanceStatus();
+  String json = "{";
+  json.reserve(1024);
+  auto text = [](const char* value) {
+    return String("\"") + value + "\"";
+  };
+  auto add = [&json](const char* key, const String& value) {
+    if (json.length() > 1)
+      json += ',';
+    json += String("\"") + key + "\":" + value;
+  };
+  add("mode", text(modeName()));
+  add("distance_cm", distanceValid ? String(distanceCM, 1) : "null");
+  add("activity", text(activity));
+  add("balance_active", state.armed ? "true" : "false");
+  add("balance_ready", state.ready ? "true" : "false");
+  add("balance_pending", armPending ? "true" : "false");
+  add("angle_deg", state.angleValid ? String(state.angle, 2) : "null");
+  add("target_deg", String(state.target, 2));
+  add("tilt_deg", state.angleValid ? String(state.angle - state.target, 2) : "null");
+  add("balance_pwm", String(state.pwm));
+  add("drive_left", String(state.driveLeft));
+  add("drive_right", String(state.driveRight));
+  add("output_left", String(state.outputLeft));
+  add("output_right", String(state.outputRight));
+  add("output_limited", state.limited ? "true" : "false");
+  add("pid_p", String(state.kp, 3));
+  add("pid_i", String(state.ki, 3));
+  add("pid_d", String(state.kd, 3));
+  add("pid_update", String(pidUpdate));
+  add("pid_message", text(pidMessage));
+  add("deadzone_deg", String(state.deadZone, 3));
+  add("deadzone_update", String(deadZoneUpdate));
+  add("deadzone_message", text(deadZoneMessage));
+  add("balance_message", text(state.message));
+  add("calibration_message", text(calibrationMessage));
+  return json + '}';
+}
+
+// Browser commands and WebSocket sessions
+
+// Interpret commands independently of the connection and payload handling below.
+void handleCommand(const String& command) {
+  // STOP zeros driving; settings remain off. Emergency stop disables everything.
+  if (command == "stop")
+    requestUserStop();
+  else if (command == "heartbeat")
+    lastHeartbeat = millis();
+  else if (command == "motors:off")
+    stopAndManual();
+  else if (command == "mode:calibration")
+    enterCalibration();
+  else if (command == "mode:pid") {
+    stopAndManual();
+    currentMode = PID_TUNING_MODE;
+    activity = "PID settings - motors off";
+  } else if (command.startsWith("imu:save:"))
+    saveUprightCalibration(command.substring(sizeof("imu:save:") - 1));
+  else if (command.startsWith("deadzone:apply:"))
+    updateDeadZone(command.substring(sizeof("deadzone:apply:") - 1), false);
+  else if (command.startsWith("deadzone:save:"))
+    updateDeadZone(command.substring(sizeof("deadzone:save:") - 1), true);
+  else if (command.startsWith("pid:apply:"))
+    updatePIDSettings(command.substring(sizeof("pid:apply:") - 1), false);
+  else if (command.startsWith("pid:save:"))
+    updatePIDSettings(command.substring(sizeof("pid:save:") - 1), true);
+  else if (command == "mode:manual" || command == "mode:distance") {
+    stopAndManual();
+    if (command == "mode:distance") {
+      currentMode = DISTANCE_MODE;
+      distanceValid = false;
+      lastSensor = millis() - SENSOR_INTERVAL_MS;
+      activity = "Checking distance";
+    } else
+      requestUserStop();
+  } else if (currentMode == REMOTE_MODE && drive(command)) {
+    lastDrive = millis();
+  } else if (currentMode == REMOTE_MODE)
+    stopMotors();
+}
+
+// Only the accepted controller can issue commands. Disconnects shut down immediately.
+void webSocketEvent(uint8_t client, WStype_t type, uint8_t* payload, size_t length) {
+  // Accept one controller, reset to a stopped state, then send its first status.
+  if (type == WStype_CONNECTED) {
+    if (controller >= 0) {
+      wsServer.disconnect(client);
+      return;
+    }
+    // Initial connection may arrive while the initially stopped robot balances.
+    // Reconnect after a safety stop preserves its disabled state.
+    if (requestedMotion != STOPPED || rampActive)
+      stopAndManual();
+    controller = client;
+    lastHeartbeat = millis();
+    String state = statusJSON();
+    wsServer.sendTXT(client, state);
+    return;
+  }
+  if (client != controller)
+    return;
+  // Disconnect immediately stops motion and returns to manual mode.
+  if (type == WStype_DISCONNECTED) {
+    controller = -1;
+    stopAndManual();
+    return;
+  }
+  if (type != WStype_TEXT)
+    return;
+  // Copy only the supplied bytes; do not assume a NUL-terminated payload.
+  if (length == 0 || length > 64) {
+    stopAndManual();
+    return;
+  }
+  String command;
+  command.reserve(length);
+  for (size_t i = 0; i < length; ++i)
+    command += static_cast<char>(payload[i]);
+
+  handleCommand(command);
+  String state = statusJSON();
+  if (command != "heartbeat")
+    wsServer.sendTXT(client, state);
+}
+
+// Arduino entry points
+
+// Initialization order matters: keep motors off, restore settings, then start services.
 void setup() {
   pinMode(MOTOR_IN1, OUTPUT);
   pinMode(MOTOR_IN2, OUTPUT);
   pinMode(MOTOR_IN3, OUTPUT);
   pinMode(MOTOR_IN4, OUTPUT);
-  moveMotor(0, 0);  // Keep motors off during startup.
+  moveMotor(0, 0); // Keep motors off during startup.
   pinMode(PIN_TRIG, OUTPUT);
   digitalWrite(PIN_TRIG, LOW);
   pinMode(PIN_ECHO, INPUT);
 
-
   Serial.begin(115200);
   // Give USB Serial a short chance to attach, but still boot without a PC.
   const uint32_t serialStarted = millis();
-  while (!Serial && millis() - serialStarted < 2000) delay(10);
+  while (!Serial && millis() - serialStarted < 2000)
+    delay(10);
   Serial.println("[BOOT] XIAO Robot AP firmware starting");
 
-  prefs.begin("servoCalib", false);  // Preserve existing wheel calibration.
+  prefs.begin("servoCalib", false); // Preserve existing wheel calibration.
   leftPWM = constrain(prefs.getInt("leftPWM", leftPWM), 0, 255);
   rightPWM = constrain(prefs.getInt("rightPWM", rightPWM), 0, 255);
   Serial.printf("PWM: L=%d R=%d. L/l and R/r adjust; S saves.\n", leftPWM, rightPWM);
 
-
-  loadUprightCalibration(); // Load saved upright before starting the sensor/PID task.
+  loadUprightCalibration();
+  loadPIDSettings(); // Defaults or saved tuning, before the single output task starts.
 
   // Sensor task keeps angle telemetry live even during ordinary driving.
   // Initialization alone never writes nonzero motor output.
@@ -433,10 +672,13 @@ void setup() {
   if (!WiFi.softAPConfig(address, address, subnet) ||
       !WiFi.softAP(AP_SSID, AP_PASSWORD, 1, false, 1)) {
     Serial.println("AP startup failed; motors remain stopped. Reset to retry.");
-    while (true) { stopMotors(); delay(100); }
+    while (true) {
+      stopMotors();
+      delay(100);
+    }
   }
-  Serial.printf("Wi-Fi: %s\nPassword: %s\nOpen http://%s\n",
-                AP_SSID, AP_PASSWORD, WiFi.softAPIP().toString().c_str());
+  Serial.printf("Wi-Fi: %s\nPassword: %s\nOpen http://%s\n", AP_SSID, AP_PASSWORD,
+                WiFi.softAPIP().toString().c_str());
   // Serve the embedded HTML from flash. No separate CSS/JS/filesystem upload
   // is required; no-store asks the browser to fetch the current firmware page.
   httpServer.on("/", []() {
@@ -453,28 +695,36 @@ void setup() {
     page.replace("%ROBOT_SSID%", robotName);
     httpServer.send(200, "text/html; charset=utf-8", page);
   });
-  httpServer.onNotFound([]() { httpServer.send(404, "text/plain", "Open http://192.168.4.1/"); });
+  httpServer.onNotFound([]() {
+    httpServer.send(404, "text/plain", "Open http://192.168.4.1/");
+  });
   wsServer.begin();
   wsServer.onEvent(webSocketEvent);
   httpServer.begin();
 }
 
+// Service networking and sensors, enforce timeouts, and publish drive requests.
+// The independent IMU task performs PID calculation and final motor writes.
 void loop() {
   // Enforce timeouts before accepting queued commands and before autonomy.
   checkControlTimeouts(millis());
   httpServer.handleClient();
   wsServer.loop();
   checkControlTimeouts(millis());
-  if (!balanceStatus().armed) sampleDistance(millis()); // Avoid blocking Echo waits while balancing.
+  sampleDistance(millis()); // The independent motor task continues during Echo waits.
   checkControlTimeouts(millis());
-  if (currentMode == DISTANCE_MODE) handleDistanceMode();
+  if (currentMode == DISTANCE_MODE)
+    handleDistanceMode();
   updateDriveMotion(millis());
-  serviceIdleBalance();
+  serviceController();
   serialCalibration();
   // Send display updates four times per second without delaying the loop.
   if (millis() - lastStatus >= 250) {
     lastStatus = millis();
-    if (controller >= 0) { String state = statusJSON(); wsServer.sendTXT(controller, state); }
+    if (controller >= 0) {
+      String state = statusJSON();
+      wsServer.sendTXT(controller, state);
+    }
   }
   // Repeat a small diagnostic so opening Serial Monitor after boot still
   // shows output. Skip if USB isn't ready or its transmit buffer is full.
@@ -483,9 +733,8 @@ void loop() {
     lastSerialReport = millis();
     if (Serial && Serial.availableForWrite() >= 160) {
       Serial.printf("[Robot running] uptime=%lu s mode=%s Wi-Fi=%s URL=http://%s/\n",
-                    static_cast<unsigned long>(millis() / 1000),
-                    modeName(),
-                    AP_SSID, WiFi.softAPIP().toString().c_str());
+                    static_cast<unsigned long>(millis() / 1000), modeName(), AP_SSID,
+                    WiFi.softAPIP().toString().c_str());
     }
   }
 }

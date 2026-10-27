@@ -1,39 +1,34 @@
 # Robot Arduino IDE project
 
-Open Robot_ArduinoIDE.ino in Arduino IDE 2.x. This folder is an independent copy of the current robot firmware, beside main and PID_test. Keep the sketch filename and folder name identical. No PlatformIO or filesystem upload is needed. Do not copy the standalone PID_test sketch into this folder.
+Open `Robot_ArduinoIDE.ino` in Arduino IDE 2.x. Keep the complete folder and its name intact. The application is in two `.ino` tabs; third-party sources are bundled in `src/lib`. No PlatformIO, separate library installation or filesystem upload is needed. Do not add the standalone PID test sketch to this folder.
 
 ## Board and upload
 
-1. Install/select Espressif's esp32 board package in Boards Manager. Verified with Espressif Arduino ESP32 core 3.3.5; see BUILD_REPORT.md for the result.
-2. Select XIAO_ESP32C3 (Seeed Studio XIAO ESP32C3).
-3. Enable USB CDC On Boot. Set USB Mode to Hardware CDC and JTAG if that option is offered. This keeps Serial on USB while D6 is the MPU interrupt.
-4. Select the board's current COM port, Verify, then Upload. Close Serial Monitor before Upload. Serial Monitor speed is 115200 baud.
-5. Join the Wi-Fi network from src/robot_config.h and open http://192.168.4.1/.
+1. Install Espressif's **esp32** package in Boards Manager. See `BUILD_REPORT.md` for the verified core version.
+2. Select **XIAO_ESP32C3** (Seeed Studio XIAO ESP32C3).
+3. Enable **USB CDC On Boot**. If USB Mode is offered, select **Hardware CDC and JTAG**. D6 remains the MPU interrupt.
+4. Select the board's current COM port. Close Serial Monitor, then Verify and Upload. Serial speed is **115200**.
+5. Join the Wi-Fi network configured in `robot_config.h` (default **XIAO-Robot**, password **robotdrive**) and open **http://192.168.4.1/**. Refresh the browser after uploading changed firmware.
 
-## Arduino IDE tabs and folders
+## Code layout
 
-- Robot_ArduinoIDE.ino: the actual robot application, including setup(), loop(), Wi-Fi, motor ramps, distance mode and calibration saving. This is not a wrapper.
-- Balance.ino: the complete upright PID controller and MPU6050 code, visible as an IDE tab.
-- robot_config.h: editable pins, Wi-Fi, default upright angle, PID gains and timing; visible as an IDE tab.
-- web_page.h: embedded control webpage; visible as an IDE tab.
-- balance.h and robot_types.h: shared declarations/types; visible as IDE tabs.
-- src/lib/: third-party library sources, automatically compiled. Only these libraries use .cpp/.c files.
-- lib/: original library ZIP archives and license metadata.
-- THIRD_PARTY.json: bundled versions and packaging notes.
+- `Robot_ArduinoIDE.ino`: shared state, movement/ramping, obstacle sensing, settings, browser commands, setup and loop, grouped by topic.
+- `Balance.ino`: independent IMU task, PID calculation, drive/correction mixing and final motor output.
+- `robot_config.h`: grouped wiring, Wi-Fi, driving, avoidance, attitude, output and advanced settings; validation is at the bottom.
+- `web_page.h`: offline webpage, including one shared Apply/Save/confirmation flow for PID and angle dead zone.
+- `balance.h`, `robot_types.h`: shared declarations. Arduino combines `.ino` tabs; explicit prototypes and distinct mode identifiers avoid preprocessor/macro conflicts.
+- `src/lib`: bundled WebSockets, PID, I2Cdev and MPU6050 library sources. `lib` retains the original archives; see `THIRD_PARTY.json` for versions and licenses.
 
-All application code is now in the two .ino tabs. Arduino combines these tabs during compilation, so helper declarations are explicit and application mode names avoid the PID library's MANUAL macro. Keep both .ino files inside the Robot_ArduinoIDE folder. No third-party library installation is required.
+## Current operation
 
-## Current behavior
+Both driving modes continuously combine base wheel commands with PID attitude correction around the saved upright target. Remote control uses arrows/WASD. Forward/reverse starts at requested PWM **100** and S-ramps to the saved wheel trims over **1 second**; turns are immediate. Release/STOP zeros base drive while attitude correction remains active. Distance mode goes forward above **20 cm**, reverses below **5 cm**, and turns left between them, including endpoints. No echo retains the last movement or starts forward if stopped.
 
-Manual: hold arrows/WASD to drive. Distance: forward above 20 cm, reverse below 5 cm, turn left from 5 through 20 cm. No echo keeps the previous movement; before any movement it starts forward. Forward/backward from STOP starts at PWM 50 and S-ramps to each wheel's target over 2000 ms. Turns react immediately. Releasing a command/STOP immediately requests upright balancing. EMERGENCY STOP disables motor output and balance. Wi-Fi timeouts also disable output.
+Default PID gains are **P=21, I=0, D=0.8**. The default angle dead zone is **+/-2 degrees**: attitude correction is zero within the band, while base driving still works. Final mixed wheel outputs are limited to **+/-255**, then magnitudes below the PWM dead zone of **50** become zero; exactly +/-50 passes. The current correction limit is **+/-255**. There is no operating tilt cutoff.
 
-IMU calibration mode keeps motors off. Hold upright, capture or enter the measured angle, then Save. First use defaults to 178 degrees. A saved angle overrides the default at startup through Preferences namespace imuCalib/key upright. A normal upload without flash erasure retains stored calibration and wheel trims. Angle/Target/Tilt remain visible beside Wi-Fi. STOP is centred in the direction pad; emergency stop is below it.
+**PID settings** stops all motor output. Apply PID / Apply dead zone are temporary; Save retains each setting after restart. The page confirms the active values. Select Remote drive or Avoid obstacles to test afterward. **IMU calibration** also keeps motors off; capture/enter the upright angle and Save. First-use upright target is **178 degrees**; calibration accepts 90..270 degrees in the pitch+180 convention. These bounds are not a tilt cutoff. Angle, target, tilt and actual wheel outputs remain visible by the Wi-Fi display.
 
-## Hardware
+Emergency stop, disconnect, stale held commands and sensor/control faults disable all motor output. After a fault, held refreshes do not auto-restart; fix the cause and explicitly request STOP or a new direction. Startup requests stopped attitude correction once valid IMU data is ready. Saved wheel trims, upright angle, PID gains and angle dead zone survive ordinary uploads without flash erasure; Preferences keys match PlatformIO.
 
-Seeed XIAO ESP32-C3; DRV8833 IN1..IN4 on D0..D3; MPU6050 SDA D4, SCL D5, INT D6; HC-SR04 Trig D10, Echo D7. Echo needs suitable 5 V to 3.3 V level shifting and common ground. The firmware does not confirm physical wiring. Support the robot for the first test: stopped balancing may move the wheels; continuing with no ultrasonic echo does not establish a clear path.
+## Wiring
 
-## Sources
-
-Arduino sketch layout: https://docs.arduino.cc/arduino-cli/sketch-specification/
-Seeed board setup: https://wiki.seeedstudio.com/XIAO_ESP32C3_Getting_Started/
+XIAO ESP32-C3; DRV8833 inputs D0..D3; MPU6050 SDA D4, SCL D5, INT D6; HC-SR04 Trig D10, Echo D7. Level-shift Echo to 3.3 V and share ground. Support the robot during first tests: even stopped attitude correction can move the wheels. Software build checks do not validate physical balance or wiring.
