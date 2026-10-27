@@ -1,20 +1,23 @@
 # Arduino IDE build verification
 
-Verified 26 October 2026 with Arduino CLI and Espressif Arduino ESP32 core 3.3.5.
+Verified 27 October 2026 with Arduino CLI and Espressif Arduino ESP32 core 3.3.5.
 
 - Board: XIAO_ESP32C3. USB CDC On Boot: Enabled.
 - FQBN: `esp32:esp32:XIAO_ESP32C3:CDCOnBoot=default`.
 - Application tabs: `Robot_ArduinoIDE.ino` and `Balance.ino`.
-- Compile/link: PASS. Flash: **1,076,448 / 1,310,720 bytes (82%)**.
+- Compile/link: PASS. Flash: **1,078,918 / 1,310,720 bytes (82%)**.
 - Global RAM: **38,404 / 327,680 bytes (11%)**.
-- All four bundled third-party libraries compile from `src/lib`.
-- No application `.cpp` files; only third-party libraries use `.cpp`/`.c`.
-- Nothing uploaded or hardware-tested.
+- Bundled libraries compile from `src/lib`; no separate library installs required.
+- No application `.cpp` files. Nothing uploaded or hardware-tested.
 
-## PlatformIO parity
+## Configuration cleanup checks
 
-All **45 application function definitions** match the current PlatformIO source after normalizing application mode identifiers. `robot_config.h`, `balance.h` and `web_page.h` are byte-identical. Arduino-specific differences are bundled-library include paths, explicit function prototypes, shared enums in `robot_types.h`, distinct application mode identifiers to avoid PID macros, and removal of the internal anonymous namespace for Arduino sketch preprocessing.
+All 45 original configuration values are unchanged. Editable defaults and connection/timing parameters are centralized in `robot_config.h`; repeated wheel clamps reuse `BALANCE_MAX_PWM`. The output dead zone remains 150 and the default angle dead zone remains +/-2 degrees. Math expressions and chip-format checks remain beside their algorithms.
 
-Includes continuous drive plus attitude correction, the PID settings page and confirmations, saved upright calibration, saved PID/dead-zone settings, the default +/-2 degree angle dead zone, PWM output dead zone 50, and current motion/configuration values. Code organization and formatting follow the current PlatformIO version.
+43 existing function definitions match the previous control/validation logic after expanding the named constants and normalizing the three revised validation messages. Setup and diagnostic reporting were checked separately through native compilation and page/configuration checks. The control task, motor pipeline, timeout/fault checks, saved Preferences keys and runtime calibration remain.
 
-Verification used an isolated workspace board-core configuration and build directory; the shared Arduino installation was not modified.
+The function-reference audit found no unused application functions, including callbacks. Redundant explicit prototype blocks were removed; Arduino's generated prototypes compile successfully. The application now has 47 referenced functions, including the new URL and page-rendering helpers.
+
+The rendered-page regression tests pass with default and customized header values: direction controls, mode selection, PID/dead-zone Apply/Save/acknowledgements, validation, keyboard input, reconnect and offline assets. HTML limits and JavaScript parameters are generated from the same configuration header. This checks software behaviour, not physical robot dynamics.
+
+Verification uses the isolated workspace board-core configuration; the shared Arduino installation was not modified. Arduino-specific configuration cleanup is now maintained independently of the PlatformIO source layout.

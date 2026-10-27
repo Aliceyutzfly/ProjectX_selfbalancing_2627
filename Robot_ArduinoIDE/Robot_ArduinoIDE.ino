@@ -12,35 +12,6 @@
 #include "balance.h"
 #include "robot_types.h"
 
-// Explicit declarations for Arduino sketch preprocessing.
-bool isSettingsMode();
-const char* modeName();
-void moveMotor(int left, int right);
-void clearDriveRequest();
-void stopMotors();
-void stopAndManual();
-void serviceController();
-void requestMotion(Motion motion);
-void updateDriveMotion(uint32_t now);
-bool drive(const String& command);
-void requestUserStop();
-void sampleDistance(uint32_t now);
-void handleDistanceMode();
-void checkControlTimeouts(uint32_t now);
-void serialCalibration();
-void loadUprightCalibration();
-void enterCalibration();
-void saveUprightCalibration(const String& value);
-void loadPIDSettings();
-bool parsePIDValues(const String& value, double gains[3]);
-void updatePIDSettings(const String& value, bool save);
-void updateDeadZone(const String& value, bool save);
-String statusJSON();
-void handleCommand(const String& command);
-void webSocketEvent(uint8_t client, WStype_t type, uint8_t* payload, size_t length);
-void setup();
-void loop();
-
 // Modes
 
 Mode currentMode = REMOTE_MODE;
@@ -50,13 +21,13 @@ Mode currentMode = REMOTE_MODE;
 Preferences prefs;
 Preferences imuPrefs;
 Preferences pidPrefs;
-WebServer httpServer(80);
-WebSocketsServer wsServer(81);
+WebServer httpServer(HTTP_PORT);
+WebSocketsServer wsServer(WEBSOCKET_PORT);
 
 // Movement state
 
 // Independent wheel trims; saved values override these startup defaults.
-int leftPWM = 254, rightPWM = 254;
+int leftPWM = DEFAULT_LEFT_PWM, rightPWM = DEFAULT_RIGHT_PWM;
 Motion requestedMotion = STOPPED;
 bool rampActive = false;
 // Startup waits for fresh IMU data. Faults require an explicit new enable request.
@@ -107,8 +78,8 @@ const char* modeName() {
 // Positive PWM is logical forward; negative is reverse. Clear the opposite
 // DRV8833 input before applying PWM. This callback is owned by the IMU task.
 void moveMotor(int left, int right) {
-  left = constrain(left, -255, 255);
-  right = constrain(right, -255, 255);
+  left = constrain(left, -BALANCE_MAX_PWM, BALANCE_MAX_PWM);
+  right = constrain(right, -BALANCE_MAX_PWM, BALANCE_MAX_PWM);
   if (INVERT_LEFT)
     left = -left;
   if (INVERT_RIGHT)
@@ -274,17 +245,17 @@ void sampleDistance(uint32_t now) {
     return;
   lastSensor = now;
   digitalWrite(PIN_TRIG, LOW);
-  delayMicroseconds(2);
+  delayMicroseconds(TRIGGER_LOW_US);
   digitalWrite(PIN_TRIG, HIGH);
-  delayMicroseconds(10);
+  delayMicroseconds(TRIGGER_HIGH_US);
   digitalWrite(PIN_TRIG, LOW);
   const uint32_t duration = pulseInLong(PIN_ECHO, HIGH, ECHO_TIMEOUT_US);
   // Echo pulse duration is the sound round-trip time.
-  distanceCM = duration * 0.0343f / 2.0f;
-  distanceValid = duration != 0 && distanceCM >= 2.0f && distanceCM <= 400.0f;
+  distanceCM = duration * SOUND_SPEED_CM_PER_US / 2.0f;
+  distanceValid = duration != 0 && distanceCM >= SENSOR_MIN_CM && distanceCM <= SENSOR_MAX_CM;
 }
 
-// Above 20 cm: forward. Below 5 cm: reverse. Otherwise: left.
+// Apply the distance thresholds from robot_config.h.
 // No echo preserves the last request, or starts forward if stopped.
 void handleDistanceMode() {
   if (!distanceValid) {
@@ -313,7 +284,8 @@ void checkControlTimeouts(uint32_t now) {
   }
   // Held movement commands need refreshing only in remote mode.
   // Connection/command failure disables drive and balance immediately.
-  if (currentMode == REMOTE_MODE && requestedMotion != STOPPED && now - lastDrive > CONTROL_TIMEOUT_MS)
+  if (currentMode == REMOTE_MODE && requestedMotion != STOPPED &&
+      now - lastDrive > CONTROL_TIMEOUT_MS)
     stopMotors();
   if (controller < 0 && (requestedMotion != STOPPED || rampActive))
     stopAndManual();
@@ -351,8 +323,8 @@ void serialCalibration() {
     break;
   }
   if (changed) {
-    leftPWM = constrain(leftPWM, 0, 255);
-    rightPWM = constrain(rightPWM, 0, 255);
+    leftPWM = constrain(leftPWM, 0, BALANCE_MAX_PWM);
+    rightPWM = constrain(rightPWM, 0, BALANCE_MAX_PWM);
     stopAndManual();
     Serial.printf("PWM: L=%d R=%d\n", leftPWM, rightPWM);
   }
@@ -383,7 +355,7 @@ void saveUprightCalibration(const String& value) {
   const double degrees = strtod(start, &end);
   if (end == start || *end != '\0' || !isfinite(degrees) || degrees < MIN_UPRIGHT_DEG ||
       degrees > MAX_UPRIGHT_DEG) {
-    calibrationMessage = "Enter a valid angle from 90 to 270 degrees";
+    calibrationMessage = "Enter an angle within the range shown on the calibration page";
     return;
   }
   const BalanceStatus state = balanceStatus();
@@ -446,7 +418,7 @@ void updatePIDSettings(const String& value, bool save) {
   ++pidUpdate;
   double gains[3];
   if (!parsePIDValues(value, gains)) {
-    pidMessage = "Invalid PID: P 0..200, I 0..500, D 0..50";
+    pidMessage = "Invalid PID - use the ranges shown in PID settings";
     return;
   }
   if (save && !pidStorageReady) {
@@ -482,7 +454,7 @@ void updateDeadZone(const String& value, bool save) {
   const double degrees = strtod(start, &end);
   if (end == start || *end != '\0' || !isfinite(degrees) || degrees < 0 ||
       degrees > MAX_DEAD_ZONE_DEG) {
-    deadZoneMessage = "Invalid dead zone - enter 0 to 90 degrees";
+    deadZoneMessage = "Invalid dead zone - use the range shown in PID settings";
     return;
   }
   if (save && !pidStorageReady) {
@@ -545,6 +517,14 @@ String statusJSON() {
   add("balance_message", text(state.message));
   add("calibration_message", text(calibrationMessage));
   return json + '}';
+}
+
+// Actual access-point address; omit the default HTTP port in displayed links.
+String controlURL() {
+  String url = "http://" + WiFi.softAPIP().toString();
+  if (HTTP_PORT != 80)
+    url += ":" + String(HTTP_PORT);
+  return url + "/";
 }
 
 // Browser commands and WebSocket sessions
@@ -618,7 +598,7 @@ void webSocketEvent(uint8_t client, WStype_t type, uint8_t* payload, size_t leng
   if (type != WStype_TEXT)
     return;
   // Copy only the supplied bytes; do not assume a NUL-terminated payload.
-  if (length == 0 || length > 64) {
+  if (length == 0 || length > MAX_COMMAND_BYTES) {
     stopAndManual();
     return;
   }
@@ -646,16 +626,16 @@ void setup() {
   digitalWrite(PIN_TRIG, LOW);
   pinMode(PIN_ECHO, INPUT);
 
-  Serial.begin(115200);
+  Serial.begin(SERIAL_BAUD_RATE);
   // Give USB Serial a short chance to attach, but still boot without a PC.
   const uint32_t serialStarted = millis();
-  while (!Serial && millis() - serialStarted < 2000)
-    delay(10);
+  while (!Serial && millis() - serialStarted < SERIAL_CONNECT_TIMEOUT_MS)
+    delay(SERIAL_CONNECT_POLL_MS);
   Serial.println("[BOOT] XIAO Robot AP firmware starting");
 
   prefs.begin("servoCalib", false); // Preserve existing wheel calibration.
-  leftPWM = constrain(prefs.getInt("leftPWM", leftPWM), 0, 255);
-  rightPWM = constrain(prefs.getInt("rightPWM", rightPWM), 0, 255);
+  leftPWM = constrain(prefs.getInt("leftPWM", leftPWM), 0, BALANCE_MAX_PWM);
+  rightPWM = constrain(prefs.getInt("rightPWM", rightPWM), 0, BALANCE_MAX_PWM);
   Serial.printf("PWM: L=%d R=%d. L/l and R/r adjust; S saves.\n", leftPWM, rightPWM);
 
   loadUprightCalibration();
@@ -667,36 +647,25 @@ void setup() {
   Serial.printf("Balance: %s\n", balanceStatus().message);
 
   // Fixed local address: phone connects directly to the robot, without a router.
-  const IPAddress address(192, 168, 4, 1), subnet(255, 255, 255, 0);
+  const IPAddress address(AP_ADDRESS), subnet(AP_SUBNET);
   WiFi.mode(WIFI_AP);
   if (!WiFi.softAPConfig(address, address, subnet) ||
-      !WiFi.softAP(AP_SSID, AP_PASSWORD, 1, false, 1)) {
+      !WiFi.softAP(AP_SSID, AP_PASSWORD, AP_CHANNEL, AP_HIDDEN, AP_MAX_CLIENTS)) {
     Serial.println("AP startup failed; motors remain stopped. Reset to retry.");
     while (true) {
       stopMotors();
-      delay(100);
+      delay(AP_FAILURE_POLL_MS);
     }
   }
-  Serial.printf("Wi-Fi: %s\nPassword: %s\nOpen http://%s\n", AP_SSID, AP_PASSWORD,
-                WiFi.softAPIP().toString().c_str());
+  Serial.printf("Wi-Fi: %s\nPassword: %s\nOpen %s\n", AP_SSID, AP_PASSWORD, controlURL().c_str());
   // Serve the embedded HTML from flash. No separate CSS/JS/filesystem upload
   // is required; no-store asks the browser to fetch the current firmware page.
   httpServer.on("/", []() {
     httpServer.sendHeader("Cache-Control", "no-store");
-    // Show this robot's configured Wi-Fi name in the page and connection hint.
-    // Escape HTML characters so names containing e.g. & or < display as text.
-    String robotName = AP_SSID;
-    robotName.replace("&", "&amp;");
-    robotName.replace("<", "&lt;");
-    robotName.replace(">", "&gt;");
-    robotName.replace("\"", "&quot;");
-    robotName.replace("'", "&#39;");
-    String page = FPSTR(HTML_PAGE);
-    page.replace("%ROBOT_SSID%", robotName);
-    httpServer.send(200, "text/html; charset=utf-8", page);
+    httpServer.send(200, "text/html; charset=utf-8", renderControlPage());
   });
   httpServer.onNotFound([]() {
-    httpServer.send(404, "text/plain", "Open http://192.168.4.1/");
+    httpServer.send(404, "text/plain", "Open " + controlURL());
   });
   wsServer.begin();
   wsServer.onEvent(webSocketEvent);
@@ -719,7 +688,7 @@ void loop() {
   serviceController();
   serialCalibration();
   // Send display updates four times per second without delaying the loop.
-  if (millis() - lastStatus >= 250) {
+  if (millis() - lastStatus >= STATUS_INTERVAL_MS) {
     lastStatus = millis();
     if (controller >= 0) {
       String state = statusJSON();
@@ -729,12 +698,12 @@ void loop() {
   // Repeat a small diagnostic so opening Serial Monitor after boot still
   // shows output. Skip if USB isn't ready or its transmit buffer is full.
   static uint32_t lastSerialReport = 0;
-  if (millis() - lastSerialReport >= 2000) {
+  if (millis() - lastSerialReport >= SERIAL_REPORT_INTERVAL_MS) {
     lastSerialReport = millis();
-    if (Serial && Serial.availableForWrite() >= 160) {
-      Serial.printf("[Robot running] uptime=%lu s mode=%s Wi-Fi=%s URL=http://%s/\n",
+    if (Serial && Serial.availableForWrite() >= SERIAL_REPORT_MIN_SPACE) {
+      Serial.printf("[Robot running] uptime=%lu s mode=%s Wi-Fi=%s URL=%s\n",
                     static_cast<unsigned long>(millis() / 1000), modeName(), AP_SSID,
-                    WiFi.softAPIP().toString().c_str());
+                    controlURL().c_str());
     }
   }
 }

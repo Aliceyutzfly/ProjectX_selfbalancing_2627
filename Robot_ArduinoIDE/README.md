@@ -14,16 +14,16 @@ Open `Robot_ArduinoIDE.ino` in Arduino IDE 2.x. Keep the complete folder and its
 
 - `Robot_ArduinoIDE.ino`: shared state, movement/ramping, obstacle sensing, settings, browser commands, setup and loop, grouped by topic.
 - `Balance.ino`: independent IMU task, PID calculation, drive/correction mixing and final motor output.
-- `robot_config.h`: grouped wiring, Wi-Fi, driving, avoidance, attitude, output and advanced settings; validation is at the bottom.
-- `web_page.h`: offline webpage, including one shared Apply/Save/confirmation flow for PID and angle dead zone.
-- `balance.h`, `robot_types.h`: shared declarations. Arduino combines `.ino` tabs; explicit prototypes and distinct mode identifiers avoid preprocessor/macro conflicts.
+- `robot_config.h`: the single configuration header for wiring, Wi-Fi address/ports, wheel-speed defaults, driving, avoidance, attitude, output, browser timing, USB diagnostics and IMU settings. Validation is at the bottom.
+- `web_page.h`: offline webpage and renderer. Limits, thresholds, connection port and browser timing are filled from `robot_config.h`, so there is no separate JavaScript configuration to keep in sync. PID and angle dead zone share one Apply/Save/confirmation flow.
+- `balance.h`, `robot_types.h`: shared declarations. Arduino generates the internal function prototypes. Shared types and distinct application mode identifiers avoid preprocessor/PID macro conflicts.
 - `src/lib`: bundled WebSockets, PID, I2Cdev and MPU6050 library sources. `lib` retains the original archives; see `THIRD_PARTY.json` for versions and licenses.
 
 ## Current operation
 
 Both driving modes continuously combine base wheel commands with PID attitude correction around the saved upright target. Remote control uses arrows/WASD. Forward/reverse starts at requested PWM **100** and S-ramps to the saved wheel trims over **1 second**; turns are immediate. Release/STOP zeros base drive while attitude correction remains active. Distance mode goes forward above **20 cm**, reverses below **5 cm**, and turns left between them, including endpoints. No echo retains the last movement or starts forward if stopped.
 
-Default PID gains are **P=21, I=0, D=0.8**. The default angle dead zone is **+/-2 degrees**: attitude correction is zero within the band, while base driving still works. Final mixed wheel outputs are limited to **+/-255**, then magnitudes below the PWM dead zone of **50** become zero; exactly +/-50 passes. The current correction limit is **+/-255**. There is no operating tilt cutoff.
+Default PID gains are **P=21, I=0, D=0.8**. The default angle dead zone is **+/-2 degrees**: attitude correction is zero within the band, while base driving still works. Final mixed wheel outputs are limited to **+/-255**, then magnitudes below the PWM dead zone of **150** become zero; exactly +/-150 passes. The current correction limit is **+/-255**. There is no operating tilt cutoff.
 
 **PID settings** stops all motor output. Apply PID / Apply dead zone are temporary; Save retains each setting after restart. The page confirms the active values. Select Remote drive or Avoid obstacles to test afterward. **IMU calibration** also keeps motors off; capture/enter the upright angle and Save. First-use upright target is **178 degrees**; calibration accepts 90..270 degrees in the pitch+180 convention. These bounds are not a tilt cutoff. Angle, target, tilt and actual wheel outputs remain visible by the Wi-Fi display.
 
@@ -32,3 +32,11 @@ Emergency stop, disconnect, stale held commands and sensor/control faults disabl
 ## Wiring
 
 XIAO ESP32-C3; DRV8833 inputs D0..D3; MPU6050 SDA D4, SCL D5, INT D6; HC-SR04 Trig D10, Echo D7. Level-shift Echo to 3.3 V and share ground. Support the robot during first tests: even stopped attitude correction can move the wheels. Software build checks do not validate physical balance or wiring.
+
+## Editing settings
+
+Edit `robot_config.h`, then compile and upload. Do not change the `.ino` globals to tune the robot: they hold runtime state, not separate configuration. `MOTOR_PWM_DEAD_ZONE` is **150**; `DRIVE_START_PWM` is **100**; `DRIVE_RAMP_MS` is **1000**. `BALANCE_MAX_PWM` is reused for all wheel-command clamps. The default wheel targets are `DEFAULT_LEFT_PWM` and `DEFAULT_RIGHT_PWM` (**254** each).
+
+The browser form ranges and timing follow the header automatically. Saved wheel trims, upright target, PID gains and angle dead zone still override their startup defaults; updating those defaults does not erase saved calibration. The PWM output dead zone is a compile-time setting and is separate from the saved angle dead zone.
+
+The configuration organization is maintained directly in this Arduino folder. Preserve it when syncing later changes from PlatformIO; the headers and rendering setup now deliberately differ while using the same control behaviour.

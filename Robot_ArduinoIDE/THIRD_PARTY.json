@@ -12,7 +12,7 @@
     "Preferences",
     "Wire"
   ],
-  "changes": "Third-party relative includes only. Application is in Robot_ArduinoIDE.ino and Balance.ino; enum mode names adjusted to avoid the PID MANUAL macro when Arduino combines tabs; explicit function declarations preserve sketch preprocessing.",
+  "changes": "Bundled-library relative includes only for third-party sources. Application remains in Robot_ArduinoIDE.ino and Balance.ino; robot_types.h avoids PID MANUAL macro conflicts. robot_config.h owns configuration and web_page.h renders matching browser settings. Arduino generates internal function prototypes.",
   "include_adjustments": [
     {
       "file": "Balance.ino",

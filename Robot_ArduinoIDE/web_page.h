@@ -1,5 +1,6 @@
 #pragma once
 #include <Arduino.h>
+#include "robot_config.h"
 
 // Embedded assets: no Internet, CDN, filesystem upload, or external images.
 // 1. PROGMEM stores the page in flash. A C++ raw string literal
@@ -56,7 +57,7 @@ footer{font-size:12px;color:#92a5bf;line-height:1.6;margin-top:18px}kbd{font-fam
 <h2>Set upright angle</h2>
 <p class="hint">Hold the robot upright. Capture or enter the angle, then save.</p>
 <label for="uprightValue">Upright angle (degrees)</label>
-<input id="uprightValue" type="number" min="90" max="270" step="0.01" inputmode="decimal" disabled>
+<input id="uprightValue" type="number" min="%MIN_UPRIGHT_DEG%" max="%MAX_UPRIGHT_DEG%" step="0.01" inputmode="decimal" disabled>
 <button id="captureUpright" disabled>Capture current angle</button>
 <button id="saveUpright" disabled>Save upright angle</button>
 <p class="hint" id="calibrationMessage" role="status">Waiting for robot status...</p>
@@ -78,19 +79,19 @@ footer{font-size:12px;color:#92a5bf;line-height:1.6;margin-top:18px}kbd{font-fam
 <h2>Attitude PID</h2>
 <p class="hint">Enter all three gains, then press Apply or Save. Motors stay off here; select Remote drive to test.</p>
 <div class="pid-fields">
-<label for="pidP">P<input id="pidP" type="number" min="0" max="200" step="0.001" inputmode="decimal" disabled></label>
-<label for="pidI">I<input id="pidI" type="number" min="0" max="500" step="0.001" inputmode="decimal" disabled></label>
-<label for="pidD">D<input id="pidD" type="number" min="0" max="50" step="0.001" inputmode="decimal" disabled></label>
+<label for="pidP">P<input id="pidP" type="number" min="0" max="%PID_MAX_KP%" step="0.001" inputmode="decimal" disabled></label>
+<label for="pidI">I<input id="pidI" type="number" min="0" max="%PID_MAX_KI%" step="0.001" inputmode="decimal" disabled></label>
+<label for="pidD">D<input id="pidD" type="number" min="0" max="%PID_MAX_KD%" step="0.001" inputmode="decimal" disabled></label>
 </div>
 <button id="applyPID" disabled>Apply PID</button>
 <button id="savePID" disabled>Save PID to robot</button>
 <h3>Angle dead zone</h3>
 <p class="hint">No attitude correction within this many degrees on either side of upright. Driving still works. Set 0 to disable the band.</p>
-<div class="pid-fields"><label for="deadZone">+/- degrees<input id="deadZone" type="number" min="0" max="90" step="0.1" value="2" inputmode="decimal" disabled></label></div>
+<div class="pid-fields"><label for="deadZone">+/- degrees<input id="deadZone" type="number" min="0" max="%MAX_DEAD_ZONE_DEG%" step="0.1" value="%DEFAULT_DEAD_ZONE_DEG%" inputmode="decimal" disabled></label></div>
 <button id="applyDeadZone" disabled>Apply dead zone</button>
 <button id="saveDeadZone" disabled>Save dead zone to robot</button>
 <p class="hint" id="deadZoneActive">Active dead zone: waiting...</p>
-<p class="hint" id="deadZoneMessage" role="status">Default: +/-2 degrees.</p>
+<p class="hint" id="deadZoneMessage" role="status">Default: +/-%DEFAULT_DEAD_ZONE_DEG% degrees.</p>
 <p class="hint" id="pidActive">Waiting for gains...</p>
 <p class="hint" id="pidMessage" role="status">Apply is temporary; Save retains gains after restart.</p>
 </section>
@@ -99,6 +100,14 @@ footer{font-size:12px;color:#92a5bf;line-height:1.6;margin-top:18px}kbd{font-fam
 <!-- 4. JavaScript connects controls to the robot over a persistent WebSocket. -->
 <script>
 'use strict';
+// Numeric placeholders are filled from robot_config.h when serving the page.
+const config = {
+  uprightMin:%MIN_UPRIGHT_DEG%, uprightMax:%MAX_UPRIGHT_DEG%,
+  pidMax:[%PID_MAX_KP%,%PID_MAX_KI%,%PID_MAX_KD%], deadZoneMax:%MAX_DEAD_ZONE_DEG%,
+  forwardCM:%FORWARD_DISTANCE_CM%, reverseCM:%REVERSE_DISTANCE_CM%,
+  wsPort:%WEBSOCKET_PORT%, heartbeatMS:%HEARTBEAT_INTERVAL_MS%,
+  reconnectMS:%RECONNECT_INTERVAL_MS%, confirmationMS:%SETTINGS_CONFIRM_TIMEOUT_MS%
+};
 // heldInput distinguishes a particular touch pointer from a keyboard key.
 const $ = id => document.getElementById(id);
 const driveButtons = [...document.querySelectorAll('.drive')];
@@ -106,11 +115,11 @@ let socket, connected = false, hasStatus = false, mode = 'MANUAL', held = null, 
 let latestAngle = null, imuReady = false;
 // Both settings forms use the same validation, send and confirmation flow.
 const tuning = {
-  pid: {name:'PID', fields:['pidP','pidI','pidD'], keys:['pid_p','pid_i','pid_d'], limits:[200,500,50],
-    active:'pidActive', message:'pidMessage', invalid:'Enter P 0..200, I 0..500, D 0..50.',
+  pid: {name:'PID', fields:['pidP','pidI','pidD'], keys:['pid_p','pid_i','pid_d'], limits:config.pidMax,
+    active:'pidActive', message:'pidMessage', invalid:'Enter P 0..' + config.pidMax[0] + ', I 0..' + config.pidMax[1] + ', D 0..' + config.pidMax[2] + '.',
     format:v => 'P ' + v[0] + ' | I ' + v[1] + ' | D ' + v[2]},
-  deadzone: {name:'dead zone', fields:['deadZone'], keys:['deadzone_deg'], limits:[90],
-    active:'deadZoneActive', message:'deadZoneMessage', invalid:'Enter a dead zone from 0 to 90 degrees.',
+  deadzone: {name:'dead zone', fields:['deadZone'], keys:['deadzone_deg'], limits:[config.deadZoneMax],
+    active:'deadZoneActive', message:'deadZoneMessage', invalid:'Enter a dead zone from 0 to ' + config.deadZoneMax + ' degrees.',
     format:v => '+/-' + v[0] + ' degrees'}
 };
 function resetTuning() {
@@ -168,7 +177,7 @@ function updateControls() {
   $('saveUpright').disabled = !enabled || !calibration || !imuReady;
   $('manual').setAttribute('aria-pressed', String(manual));
   $('distanceMode').setAttribute('aria-pressed', String(distance));
-  $('modeLabel').textContent = tuning ? 'PID settings: adjust and save gains; motors off.' : calibration ? 'Calibration: set and save upright angle; motors off.' : distance ? 'Distance: forward above 20 cm; reverse below 5 cm; otherwise left. No echo keeps moving.' : 'Remote: arrows drive; attitude correction stays active.';
+  $('modeLabel').textContent = tuning ? 'PID settings: adjust and save gains; motors off.' : calibration ? 'Calibration: set and save upright angle; motors off.' : distance ? 'Distance: forward above ' + config.forwardCM + ' cm; reverse below ' + config.reverseCM + ' cm; otherwise left. No echo keeps moving.' : 'Remote: arrows drive; attitude correction stays active.';
 }
 // Firmware changes the mode; the browser waits for its status acknowledgement.
 function selectMode(command) { clearHeld(); send(command); }
@@ -201,8 +210,8 @@ $('saveUpright').addEventListener('click', () => {
   if (mode !== 'CALIBRATION' || !imuReady) return;
   const text = String($('uprightValue').value || '').trim();
   const value = Number(text);
-  if (!text || !Number.isFinite(value) || value < 90 || value > 270) {
-    $('calibrationMessage').textContent = 'Enter an angle from 90 to 270 degrees.';
+  if (!text || !Number.isFinite(value) || value < config.uprightMin || value > config.uprightMax) {
+    $('calibrationMessage').textContent = 'Enter an angle from ' + config.uprightMin + ' to ' + config.uprightMax + ' degrees.';
     return;
   }
   send('imu:save:' + value.toFixed(2));
@@ -231,7 +240,7 @@ function submitTuning(kind, save) {
     if (form.pending !== request) return;
     form.pending = null;
     $(form.message).textContent = form.feedback = 'No ' + form.name + ' confirmation received - check connection and uploaded firmware.';
-  }, 3000);
+  }, config.confirmationMS);
 }
 
 function showTuning(kind, state) {
@@ -277,7 +286,7 @@ window.addEventListener('blur', stopAll);
 window.addEventListener('pagehide', stopAll);
 document.addEventListener('visibilitychange', () => { if (document.hidden) stopAll(); });
 function connect() {
-  socket = new WebSocket('ws://' + location.hostname + ':81/');
+  socket = new WebSocket('ws://' + location.hostname + ':' + config.wsPort + '/');
   // Connected starts with no held movement. The firmware sends the current state.
   socket.onopen = () => {
     connected = true;
@@ -331,19 +340,45 @@ function connect() {
     $('activity').textContent = 'Disconnected - check robot';
     $('distance').textContent = '-- cm';
     updateControls();
-    setTimeout(connect, 1500);
+    setTimeout(connect, config.reconnectMS);
   };
   socket.onerror = () => socket.close();
 }
 // Held commands refresh the motor dead-man timer. Heartbeats alone never move it.
-// Every 150 ms: heartbeat keeps the session alive in every mode. A held
+// Each heartbeat keeps the session alive in every mode. A held
 // movement additionally refreshes the separate manual-drive watchdog.
 // Hidden pages send neither. Firmware stops on a connection timeout.
 setInterval(() => {
   if (!connected || document.hidden) return;
   send('heartbeat');
   if (held && canDrive()) send(held);
-}, 150);
+}, config.heartbeatMS);
 connect();
 </script></body></html>
 )HTML";
+
+// Page values and validation limits come from the same header as the firmware.
+inline String renderControlPage() {
+  String robotName = AP_SSID;
+  robotName.replace("&", "&amp;");
+  robotName.replace("<", "&lt;");
+  robotName.replace(">", "&gt;");
+  robotName.replace("\"", "&quot;");
+  robotName.replace("'", "&#39;");
+  String page = FPSTR(HTML_PAGE);
+  page.replace("%ROBOT_SSID%", robotName);
+  page.replace("%MIN_UPRIGHT_DEG%", String(MIN_UPRIGHT_DEG, 3));
+  page.replace("%MAX_UPRIGHT_DEG%", String(MAX_UPRIGHT_DEG, 3));
+  page.replace("%PID_MAX_KP%", String(PID_MAX_KP, 3));
+  page.replace("%PID_MAX_KI%", String(PID_MAX_KI, 3));
+  page.replace("%PID_MAX_KD%", String(PID_MAX_KD, 3));
+  page.replace("%MAX_DEAD_ZONE_DEG%", String(MAX_DEAD_ZONE_DEG, 3));
+  page.replace("%DEFAULT_DEAD_ZONE_DEG%", String(DEFAULT_DEAD_ZONE_DEG, 3));
+  page.replace("%FORWARD_DISTANCE_CM%", String(FORWARD_DISTANCE_CM, 3));
+  page.replace("%REVERSE_DISTANCE_CM%", String(REVERSE_DISTANCE_CM, 3));
+  page.replace("%WEBSOCKET_PORT%", String(WEBSOCKET_PORT));
+  page.replace("%HEARTBEAT_INTERVAL_MS%", String(HEARTBEAT_INTERVAL_MS));
+  page.replace("%RECONNECT_INTERVAL_MS%", String(RECONNECT_INTERVAL_MS));
+  page.replace("%SETTINGS_CONFIRM_TIMEOUT_MS%", String(SETTINGS_CONFIRM_TIMEOUT_MS));
+  return page;
+}

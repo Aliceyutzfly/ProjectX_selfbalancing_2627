@@ -72,9 +72,9 @@ constexpr int ATTITUDE_MAX_PWM = 255;
 // Motor output
 
 // Limit each mixed wheel command, then suppress magnitudes below the PWM dead
-// zone. Exactly +/-50 passes. This is separate from the angle dead zone above.
+// zone. Exactly +/-150 passes. This is separate from the angle dead zone above.
 constexpr int BALANCE_MAX_PWM = 255;
-constexpr int MOTOR_PWM_DEAD_ZONE = 50;
+constexpr int MOTOR_PWM_DEAD_ZONE = 150;
 
 // Advanced settings
 
