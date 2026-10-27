@@ -15,7 +15,9 @@ function extract(source,name){
 const fixture={ready:true,armed:true,angleValid:true,angle:179.23,target:178,pwm:51,message:'Drive plus attitude correction',driveLeft:100,driveRight:110,outputLeft:151,outputRight:161,limited:false,kp:21,ki:0,kd:0.8,deadZone:2};
 const context=vm.createContext({assert,JSON,fixture,formatString(value,digits){return digits===undefined?String(value):Number(value).toFixed(digits);}});
 vm.runInContext(`
+var REMOTE_MODE=0,DISTANCE_MODE=1,CALIBRATION_MODE=2,PID_TUNING_MODE=3;
 var MANUAL=0,DISTANCE=1,CALIBRATION=2,PID_TUNING=3,currentMode=MANUAL,activity='Stopped',calls=[];
+var rawDistanceCM=24.5,rawDistanceValid=true,distanceOffsetCM=-2,distancePaused=false,distanceCalibrating=false,distanceCalibrationMessage="Reference saved";
 var distanceCM=22.5,distanceValid=true,armPending=true;
 var pidUpdate=3,deadZoneUpdate=2,pidMessage='PID saved',deadZoneMessage='Dead zone saved',calibrationMessage='Hold upright';
 var clock=1000,lastDrive=0,lastSensor=0,lastHeartbeat=0,SENSOR_INTERVAL_MS=80;
@@ -27,10 +29,12 @@ function enterCalibration(){calls.push(['calibration']);currentMode=CALIBRATION;
 function saveUprightCalibration(value){calls.push(['upright',value]);}
 function updatePIDSettings(value,save){calls.push(['pid',value,save]);}
 function updateDeadZone(value,save){calls.push(['deadzone',value,save]);}
+function startDistanceCalibration(){calls.push(['distance:calibrate']);}
 function drive(command){if(!['forward','backward','turnLeft','turnRight'].includes(command))return false;calls.push(['drive',command]);return true;}
 ${extract(main,'statusJSON')}
 ${extract(main,'handleCommand')}
 for(const [command,expected] of [
+ ['distance:calibrate',['distance:calibrate']],
  ['imu:save:178.50',['upright','178.50']],['pid:apply:21,0,0.8',['pid','21,0,0.8',false]],
  ['pid:save:12,1,0.4',['pid','12,1,0.4',true]],['deadzone:apply:2',['deadzone','2',false]],
  ['deadzone:save:3.5',['deadzone','3.5',true]],['forward',['drive','forward']],['stop',['stop']],['motors:off',['off']]
@@ -46,9 +50,10 @@ for(const valid of [true,false])for(const armed of [true,false]){
  Object.assign(fixture,{angleValid:valid,armed});
  vm.runInContext(`distanceValid=${valid};`,context);
  const state=JSON.parse(vm.runInContext('statusJSON()',context));
- assert.equal(Object.keys(state).length,25);assert.equal(state.mode,'MANUAL');assert.equal(state.balance_active,armed);
+ assert.equal(Object.keys(state).length,30);assert.equal(state.mode,'MANUAL');assert.equal(state.balance_active,armed);
  assert.equal(state.distance_cm,valid?22.5:null);assert.equal(state.angle_deg,valid?179.23:null);assert.equal(state.tilt_deg,valid?1.23:null);
  assert.equal(state.pid_p,21);assert.equal(state.pid_i,0);assert.equal(state.pid_d,0.8);assert.equal(state.deadzone_deg,2);
+ assert.equal(state.distance_raw_cm,24.5);assert.equal(state.distance_offset_cm,-2);assert.equal(state.distance_paused,false);
  assert.equal(state.pid_update,3);assert.equal(state.deadzone_update,2);assert.equal(state.output_left,151);assert.equal(state.output_limited,false);
 }
 module.exports='PASS: actual telemetry serialization and command routing: field schema/nulls/booleans, PID/dead-zone payloads, mode transitions and drive blocking';

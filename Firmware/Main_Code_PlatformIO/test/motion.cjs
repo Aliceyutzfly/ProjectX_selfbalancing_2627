@@ -1,3 +1,4 @@
+// Motion fixtures intentionally use sample trims/ramp timings; firmware defaults live in robot_config.h.
 const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm'),assert=require('node:assert/strict');
 const source=fs.readFileSync(path.join(__dirname,'../src/main.cpp'),'utf8');
 function extract(name){
@@ -7,6 +8,7 @@ function extract(name){
 }
 const context=vm.createContext({assert,Math});
 vm.runInContext(`
+var REMOTE_MODE=0,DISTANCE_MODE=1,CALIBRATION_MODE=2,PID_TUNING_MODE=3;
 var MANUAL=0,DISTANCE=1,CALIBRATION=2,PID_TUNING=3,currentMode=MANUAL,controller=0;
 var STOPPED=0,FORWARD=1,BACKWARD=2,TURN_LEFT=3,TURN_RIGHT=4,requestedMotion=STOPPED;
 var rampActive=false,rampStarted=0,rampStartLeft=0,rampStartRight=0;
@@ -14,6 +16,7 @@ var targetLeft=0,targetRight=0,appliedLeft=0,appliedRight=0,activity='Stopped';
 var armPending=true,clock=0,lastDrive=0,lastHeartbeat=0;
 var leftPWM=200,rightPWM=180,DRIVE_START_PWM=50,DRIVE_RAMP_MS=2000,CONTROL_TIMEOUT_MS=800;
 var FORWARD_DISTANCE_CM=20,REVERSE_DISTANCE_CM=5,distanceCM=-1,distanceValid=false,calibrationMessage='';
+var distancePaused=false,distanceCalibrating=false,distanceReferenceCount=0,distanceCalibrationMessage="";
 var ready=true,armed=false,armCalls=0,baseLeft=0,baseRight=0,writes=[],disconnected=[];
 function millis(){return clock;}function min(a,b){return Math.min(a,b);}function lroundf(x){return Math.round(x);}
 function balanceSetDrive(l,r){baseLeft=l;baseRight=r;}
@@ -21,7 +24,7 @@ function balanceStatus(){return {ready,armed};}
 function balanceArm(){armCalls++;return armed=ready;}
 function balanceDisarm(){armed=false;baseLeft=baseRight=0;writes.push([0,0]);}
 var wsServer={disconnect(id){disconnected.push(id);}};
-${['isSettingsMode','clearDriveRequest','stopMotors','stopAndManual','serviceController','requestMotion','drive','updateDriveMotion','requestUserStop','handleDistanceMode','checkControlTimeouts','enterCalibration'].map(extract).join('\n')}
+${['cancelDistanceCalibration','isSettingsMode','clearDriveRequest','stopMotors','stopAndManual','serviceController','requestMotion','drive','updateDriveMotion','requestUserStop','handleDistanceMode','checkControlTimeouts','enterCalibration'].map(extract).join('\n')}
 function tick(t,held=false){clock=t;lastHeartbeat=t;if(held)lastDrive=t;checkControlTimeouts(t);updateDriveMotion(t);serviceController();}
 function sense(d){distanceValid=true;distanceCM=d;handleDistanceMode();}
 

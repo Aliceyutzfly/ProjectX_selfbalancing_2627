@@ -12,7 +12,7 @@ Code and hardware files for an educational robot using a Seeed XIAO ESP32-C3, MP
 | [Firmware/PID_test](Firmware/PID_test/) | Standalone Arduino PID test sketch. |
 | [Hardware](Hardware/) | Robot hardware design files, including `ProjectX_SelfBalance_PCB`. |
 
-The main firmware provides Wi-Fi remote driving and ultrasonic obstacle avoidance, with attitude correction and calibration controls on the webpage. The Arduino version also includes a saved 20 cm ultrasonic reference calibration.
+The main firmware provides Wi-Fi remote driving and ultrasonic obstacle avoidance, with attitude correction and calibration controls on the webpage. Both main firmware versions include a saved 20 cm ultrasonic reference calibration.
 
 ## Getting started
 

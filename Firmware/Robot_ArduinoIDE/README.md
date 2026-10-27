@@ -39,7 +39,7 @@ Edit `robot_config.h`, then compile and upload. Do not change the `.ino` globals
 
 The browser form ranges and timing follow the header automatically. Saved wheel trims, upright target, PID gains and angle dead zone still override their startup defaults; updating those defaults does not erase saved calibration. The PWM output dead zone is a compile-time setting and is separate from the saved angle dead zone.
 
-The configuration organization is maintained directly in this Arduino folder. Preserve it when syncing later changes from PlatformIO; the headers and rendering setup now deliberately differ while using the same control behaviour.
+The configuration headers and webpage currently match the PlatformIO version. Keep both copies synchronized when updating either project.
 
 ## Set the ultrasonic 20 cm reference
 

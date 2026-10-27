@@ -24,6 +24,7 @@ const context=vm.createContext({assert,Number,parseDegrees(text,setTail){
   setTail(text.slice(match[0].length));return Number(match[0]);
 }});
 vm.runInContext(`
+var REMOTE_MODE=0,DISTANCE_MODE=1,CALIBRATION_MODE=2,PID_TUNING_MODE=3;
 var MANUAL=0,CALIBRATION=2,PID_TUNING=3,currentMode=MANUAL;
 var armed=false,ready=true,target=178,uprightAngle=178,output=0,motorPWM=0;
 var MIN_UPRIGHT_DEG=90,MAX_UPRIGHT_DEG=270,DEFAULT_BALANCE_UPRIGHT_DEG=178;

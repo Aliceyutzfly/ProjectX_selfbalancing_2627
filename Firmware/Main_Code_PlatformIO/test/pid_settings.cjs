@@ -26,6 +26,7 @@ const context=vm.createContext({assert,Number,parseDegrees(text,setTail){
  if(!m){setTail(text);return 0;}setTail(text.slice(m[0].length));return Number(m[0]);
 }});
 vm.runInContext(`
+var REMOTE_MODE=0,DISTANCE_MODE=1,CALIBRATION_MODE=2,PID_TUNING_MODE=3;
 var MANUAL=0,CALIBRATION=2,PID_TUNING=3,currentMode=MANUAL,armed=false,stateMutex=0,portMAX_DELAY=0;
 var deadZone=2,DEFAULT_DEAD_ZONE_DEG=2,MAX_DEAD_ZONE_DEG=90,deadZoneUpdate=0,deadZoneMessage="",savedZone=undefined;
 var gainP=21,gainI=0,gainD=0.8,output=0,motorPWM=0;

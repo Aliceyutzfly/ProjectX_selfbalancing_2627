@@ -11,6 +11,7 @@ function extract(name){
 const context=vm.createContext({assert,Math,Number});
 vm.runInContext(`
 var MOTOR_PWM_DEAD_ZONE=${pwmDeadZone};
+var BALANCE_REQUIRED_SAMPLES=10,BALANCE_FRESH_SAMPLE_MS=30;
 var deadZone=2,MAX_DEAD_ZONE_DEG=90;
 var input=181,uprightAngle=178,target=178,output=0,motorPWM=0;
 var gainP=21,gainI=0,gainD=0.8,armed=false,initialized=true,angleValid=true,goodSamples=10;

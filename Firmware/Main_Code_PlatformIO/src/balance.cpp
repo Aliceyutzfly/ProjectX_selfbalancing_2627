@@ -1,3 +1,4 @@
+// IMU sampling, PID correction and final motor output.
 #include <Arduino.h>
 #include <Wire.h>
 #include <PID_v1.h>
@@ -11,6 +12,7 @@
 #include "balance.h"
 
 namespace {
+
 MPU6050 mpu(BALANCE_IMU_ADDRESS);
 double deadZone = DEFAULT_DEAD_ZONE_DEG;
 double uprightAngle = DEFAULT_BALANCE_UPRIGHT_DEG;
@@ -32,7 +34,9 @@ const char* message = "IMU not initialized";
 
 // Interrupt means new data is available, not that the body crossed a tilt limit.
 // Sensor reads and motor updates happen in the task, never inside this ISR.
-void IRAM_ATTR dataReady() { imuInterrupt = true; }
+void IRAM_ATTR dataReady() {
+  imuInterrupt = true;
+}
 
 // Caller holds the controller mutex (or runs before task startup).
 // Automatic mode reinitializes PID history when control resumes.
@@ -49,22 +53,25 @@ void disarmLocked(const char* reason) {
   resetPIDLocked();
   baseLeft = baseRight = actualLeft = actualRight = 0;
   outputLimited = false;
-  if (motorWriter) motorWriter(0, 0);
+  if (motorWriter)
+    motorWriter(0, 0);
   message = reason;
 }
 
 void sensorFault(const char* reason) {
   angleValid = false;
   goodSamples = 0;
-  if (armed) disarmLocked(reason);
-  else message = reason;
+  if (armed)
+    disarmLocked(reason);
+  else
+    message = reason;
 }
 
 // Return immediately if no COMPLETE packet is ready; never wait in a FIFO loop.
 bool readAngle() {
   uint8_t countBytes[2];
-  if (I2Cdev::readBytes(BALANCE_IMU_ADDRESS, MPU6050_RA_FIFO_COUNTH,
-                      2, countBytes, BALANCE_I2C_TIMEOUT_MS) != 2) {
+  if (I2Cdev::readBytes(BALANCE_IMU_ADDRESS, MPU6050_RA_FIFO_COUNTH, 2, countBytes,
+                        BALANCE_I2C_TIMEOUT_MS) != 2) {
     sensorFault("IMU read failed - motors off");
     return false;
   }
@@ -73,18 +80,20 @@ bool readAngle() {
   // repeatedly controlling motors from old samples. Require explicit re-arm.
   // Count complete packets; an incomplete next packet is not another reading.
   if (count >= 1024 || count / packetSize > 2) {
-    if (armed) disarmLocked("IMU backlog - motors off");
+    if (armed)
+      disarmLocked("IMU backlog - motors off");
     angleValid = false;
     goodSamples = 0;
     mpu.resetFIFO();
     return false;
   }
-  if (count < packetSize) return false;
+  if (count < packetSize)
+    return false;
   // At most TWO packets, already known to exist; use the newest complete one.
   const uint16_t packets = count / packetSize;
   for (uint16_t i = 0; i < packets; ++i) {
-    if (I2Cdev::readBytes(BALANCE_IMU_ADDRESS, MPU6050_RA_FIFO_R_W,
-                        packetSize, fifoBuffer, BALANCE_I2C_TIMEOUT_MS) != packetSize) {
+    if (I2Cdev::readBytes(BALANCE_IMU_ADDRESS, MPU6050_RA_FIFO_R_W, packetSize, fifoBuffer,
+                          BALANCE_I2C_TIMEOUT_MS) != packetSize) {
       sensorFault("IMU packet failed - motors off");
       return false;
     }
@@ -93,7 +102,7 @@ bool readAngle() {
   VectorFloat gravity;
   float ypr[3];
   mpu.dmpGetQuaternion(&q, fifoBuffer);
-  const float norm = q.w*q.w + q.x*q.x + q.y*q.y + q.z*q.z;
+  const float norm = q.w * q.w + q.x * q.x + q.y * q.y + q.z * q.z;
   if (!isfinite(norm) || norm < 0.8f || norm > 1.2f) {
     sensorFault("Invalid IMU data - motors off");
     return false;
@@ -106,11 +115,13 @@ bool readAngle() {
     return false;
   }
   const uint32_t now = millis();
-  if (now - lastSample > 30) goodSamples = 0;
+  if (now - lastSample > BALANCE_FRESH_SAMPLE_MS)
+    goodSamples = 0;
   input = measured;
   lastSample = now;
   angleValid = true;
-  if (goodSamples < 10) ++goodSamples;
+  if (goodSamples < BALANCE_REQUIRED_SAMPLES)
+    ++goodSamples;
   return true;
 }
 
@@ -123,8 +134,8 @@ void updateAttitudeCorrection() {
   }
   pid.SetMode(AUTOMATIC);
   if (pid.Compute()) {
-    motorPWM = constrain(int(lround(output * BALANCE_OUTPUT_SIGN)),
-                         -ATTITUDE_MAX_PWM, ATTITUDE_MAX_PWM);
+    motorPWM =
+        constrain(int(lround(output * BALANCE_OUTPUT_SIGN)), -ATTITUDE_MAX_PWM, ATTITUDE_MAX_PWM);
   }
 }
 
@@ -136,8 +147,10 @@ void writeMixedMotorOutputs() {
   actualLeft = constrain(mixedLeft, -BALANCE_MAX_PWM, BALANCE_MAX_PWM);
   actualRight = constrain(mixedRight, -BALANCE_MAX_PWM, BALANCE_MAX_PWM);
   outputLimited = actualLeft != mixedLeft || actualRight != mixedRight;
-  if (abs(actualLeft) < MOTOR_PWM_DEAD_ZONE) actualLeft = 0;
-  if (abs(actualRight) < MOTOR_PWM_DEAD_ZONE) actualRight = 0;
+  if (abs(actualLeft) < MOTOR_PWM_DEAD_ZONE)
+    actualLeft = 0;
+  if (abs(actualRight) < MOTOR_PWM_DEAD_ZONE)
+    actualRight = 0;
   motorWriter(actualLeft, actualRight);
 }
 
@@ -177,25 +190,36 @@ void balanceTask(void*) {
     }
     if (afterRead - lastSample > BALANCE_IMU_TIMEOUT_MS) {
       sensorFault("IMU timeout - motors off");
-    } else if (armed && fresh) updateBalance(afterRead);
+    } else if (armed && fresh)
+      updateBalance(afterRead);
     xSemaphoreGive(stateMutex);
     vTaskDelayUntil(&wakeTime, pdMS_TO_TICKS(BALANCE_PERIOD_MS));
   }
 }
+
 } // namespace
 
 bool balanceBegin(void (*writeMotors)(int, int)) {
   motorWriter = writeMotors;
   motorWriter(0, 0);
   stateMutex = xSemaphoreCreateMutex();
-  if (!stateMutex) { message = "Balance memory allocation failed"; return false; }
+  if (!stateMutex) {
+    message = "Balance memory allocation failed";
+    return false;
+  }
   Wire.begin(MPU_SDA, MPU_SCL);
   Wire.setClock(BALANCE_I2C_HZ);
   Wire.setTimeOut(BALANCE_I2C_TIMEOUT_MS);
   I2Cdev::readTimeout = BALANCE_I2C_TIMEOUT_MS;
   mpu.initialize();
-  if (!mpu.testConnection()) { message = "MPU6050 not found - check wiring"; return false; }
-  if (mpu.dmpInitialize() != 0) { message = "MPU6050 DMP initialization failed"; return false; }
+  if (!mpu.testConnection()) {
+    message = "MPU6050 not found - check wiring";
+    return false;
+  }
+  if (mpu.dmpInitialize() != 0) {
+    message = "MPU6050 DMP initialization failed";
+    return false;
+  }
   mpu.setXGyroOffset(BALANCE_GYRO_X_OFFSET);
   mpu.setYGyroOffset(BALANCE_GYRO_Y_OFFSET);
   mpu.setZGyroOffset(BALANCE_GYRO_Z_OFFSET);
@@ -213,9 +237,10 @@ bool balanceBegin(void (*writeMotors)(int, int)) {
   mpu.resetFIFO();
   mpu.setDMPEnabled(true);
   initialized = true;
-  lastSample = millis();  // Give the first packet a full freshness interval.
+  lastSample = millis(); // Give the first packet a full freshness interval.
   message = "Ready - drive plus attitude correction";
-  if (xTaskCreate(balanceTask, "balance", 6144, nullptr, 3, nullptr) != pdPASS) {
+  if (xTaskCreate(balanceTask, "balance", BALANCE_TASK_STACK_BYTES, nullptr, BALANCE_TASK_PRIORITY,
+                  nullptr) != pdPASS) {
     initialized = false;
     detachInterrupt(digitalPinToInterrupt(MPU_INT));
     mpu.setDMPEnabled(false);
@@ -226,17 +251,20 @@ bool balanceBegin(void (*writeMotors)(int, int)) {
 }
 
 bool balanceArm() {
-  if (!stateMutex) return false;
+  if (!stateMutex)
+    return false;
   xSemaphoreTake(stateMutex, portMAX_DELAY);
   bool accepted = false;
-  if (!initialized) { /* Preserve the initialization failure message. */ }
-  else if (!angleValid || goodSamples < 10 || millis() - lastSample > 30)
+  if (!initialized) { /* Preserve the initialization failure message. */
+  } else if (!angleValid || goodSamples < BALANCE_REQUIRED_SAMPLES ||
+             millis() - lastSample > BALANCE_FRESH_SAMPLE_MS)
     message = "Wait for fresh IMU readings, then press STOP";
-  else if (armed) { accepted = true; }
-  else {
+  else if (armed) {
+    accepted = true;
+  } else {
     target = uprightAngle;
     resetPIDLocked();
-    pid.SetMode(AUTOMATIC);  // Reset accumulated correction on every explicit arm.
+    pid.SetMode(AUTOMATIC); // Reset accumulated correction on every explicit arm.
     lastDriveUpdate = millis();
     armed = true;
     message = "Drive plus attitude correction";
@@ -247,25 +275,45 @@ bool balanceArm() {
 }
 
 void balanceDisarm() {
-  if (!stateMutex) { if (motorWriter) motorWriter(0, 0); return; }
+  if (!stateMutex) {
+    if (motorWriter)
+      motorWriter(0, 0);
+    return;
+  }
   xSemaphoreTake(stateMutex, portMAX_DELAY);
   disarmLocked(initialized ? "Controller off - motors stopped" : message);
   xSemaphoreGive(stateMutex);
 }
 
 BalanceStatus balanceStatus() {
-  if (stateMutex) xSemaphoreTake(stateMutex, portMAX_DELAY);
-  BalanceStatus state {initialized && angleValid && goodSamples >= 10 && millis() - lastSample <= 30,
-                       armed, angleValid, input, target, motorPWM, message,
-                       baseLeft, baseRight, actualLeft, actualRight, outputLimited,
-                       pid.GetKp(), pid.GetKi(), pid.GetKd(), deadZone};
-  if (stateMutex) xSemaphoreGive(stateMutex);
+  if (stateMutex)
+    xSemaphoreTake(stateMutex, portMAX_DELAY);
+  BalanceStatus state{initialized && angleValid && goodSamples >= BALANCE_REQUIRED_SAMPLES &&
+                          millis() - lastSample <= BALANCE_FRESH_SAMPLE_MS,
+                      armed,
+                      angleValid,
+                      input,
+                      target,
+                      motorPWM,
+                      message,
+                      baseLeft,
+                      baseRight,
+                      actualLeft,
+                      actualRight,
+                      outputLimited,
+                      pid.GetKp(),
+                      pid.GetKi(),
+                      pid.GetKd(),
+                      deadZone};
+  if (stateMutex)
+    xSemaphoreGive(stateMutex);
   return state;
 }
 
 // Publishing a request never writes a motor or enables the controller.
 void balanceSetDrive(int left, int right) {
-  if (!stateMutex) return;
+  if (!stateMutex)
+    return;
   xSemaphoreTake(stateMutex, portMAX_DELAY);
   baseLeft = constrain(left, -BALANCE_MAX_PWM, BALANCE_MAX_PWM);
   baseRight = constrain(right, -BALANCE_MAX_PWM, BALANCE_MAX_PWM);
@@ -274,42 +322,51 @@ void balanceSetDrive(int left, int right) {
 }
 
 bool balanceSetUpright(double degrees) {
-  if (!isfinite(degrees) || degrees < MIN_UPRIGHT_DEG || degrees > MAX_UPRIGHT_DEG) return false;
-  if (stateMutex) xSemaphoreTake(stateMutex, portMAX_DELAY);
+  if (!isfinite(degrees) || degrees < MIN_UPRIGHT_DEG || degrees > MAX_UPRIGHT_DEG)
+    return false;
+  if (stateMutex)
+    xSemaphoreTake(stateMutex, portMAX_DELAY);
   const bool accepted = !armed;
   if (accepted) {
     uprightAngle = target = degrees;
     resetPIDLocked();
   }
-  if (stateMutex) xSemaphoreGive(stateMutex);
+  if (stateMutex)
+    xSemaphoreGive(stateMutex);
   return accepted;
 }
 
 bool balanceValidTunings(double kp, double ki, double kd) {
-  return isfinite(kp) && isfinite(ki) && isfinite(kd) &&
-         kp >= 0 && kp <= PID_MAX_KP && ki >= 0 && ki <= PID_MAX_KI && kd >= 0 && kd <= PID_MAX_KD;
+  return isfinite(kp) && isfinite(ki) && isfinite(kd) && kp >= 0 && kp <= PID_MAX_KP && ki >= 0 &&
+         ki <= PID_MAX_KI && kd >= 0 && kd <= PID_MAX_KD;
 }
 
 bool balanceSetTunings(double kp, double ki, double kd) {
-  if (!balanceValidTunings(kp, ki, kd)) return false;
-  if (stateMutex) xSemaphoreTake(stateMutex, portMAX_DELAY);
+  if (!balanceValidTunings(kp, ki, kd))
+    return false;
+  if (stateMutex)
+    xSemaphoreTake(stateMutex, portMAX_DELAY);
   const bool accepted = !armed;
   if (accepted) {
     resetPIDLocked();
     pid.SetTunings(kp, ki, kd);
   }
-  if (stateMutex) xSemaphoreGive(stateMutex);
+  if (stateMutex)
+    xSemaphoreGive(stateMutex);
   return accepted;
 }
 
 bool balanceSetDeadZone(double degrees) {
-  if (!isfinite(degrees) || degrees < 0 || degrees > MAX_DEAD_ZONE_DEG) return false;
-  if (stateMutex) xSemaphoreTake(stateMutex, portMAX_DELAY);
+  if (!isfinite(degrees) || degrees < 0 || degrees > MAX_DEAD_ZONE_DEG)
+    return false;
+  if (stateMutex)
+    xSemaphoreTake(stateMutex, portMAX_DELAY);
   const bool accepted = !armed;
   if (accepted) {
     deadZone = degrees;
     resetPIDLocked();
   }
-  if (stateMutex) xSemaphoreGive(stateMutex);
+  if (stateMutex)
+    xSemaphoreGive(stateMutex);
   return accepted;
 }

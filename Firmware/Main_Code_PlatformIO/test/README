@@ -1,11 +1,13 @@
+Software regression checks (Node.js .cjs files)
 
-This directory is intended for PlatformIO Test Runner and project tests.
+motion: requests, ramps, mode guards and timeouts.
+controller: PID/motor mixing, limits, dead zones and lifecycle.
+web_ui: rendered page controls, settings and distance calibration.
+calibration: saved upright target and failure handling.
+pid_settings / pid_library: tuning/persistence and PID calculation.
+protocol: command routing and telemetry schema.
+distance_reference: fresh sensor reference, persistence, pause/resume and failures.
+render_page is a test helper, not firmware.
 
-Unit Testing is a software testing method by which individual units of
-source code, sets of one or more MCU program modules together with associated
-control data, usage procedures, and operating procedures, are tested to
-determine whether they are fit for use. Unit testing finds problems early
-in the development cycle.
-
-More information about PlatformIO Unit Testing:
-- https://docs.platformio.org/en/latest/advanced/unit-testing/index.html
+Hardware, timing and storage are mocked. These do not prove physical stability.
+Motion fixtures use controlled sample trims/timings; they do not override the firmware configuration.

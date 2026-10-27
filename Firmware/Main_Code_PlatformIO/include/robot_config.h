@@ -4,23 +4,31 @@
 
 // Wiring
 
-constexpr int MOTOR_IN1 = D0;  // GPIO2, DRV8833 AIN1
-constexpr int MOTOR_IN2 = D1;  // GPIO3, DRV8833 AIN2
-constexpr int MOTOR_IN3 = D2;  // GPIO4, DRV8833 BIN1
-constexpr int MOTOR_IN4 = D3;  // GPIO5, DRV8833 BIN2
+constexpr int MOTOR_IN1 = D0; // GPIO2, DRV8833 AIN1
+constexpr int MOTOR_IN2 = D1; // GPIO3, DRV8833 AIN2
+constexpr int MOTOR_IN3 = D2; // GPIO4, DRV8833 BIN1
+constexpr int MOTOR_IN4 = D3; // GPIO5, DRV8833 BIN2
 
-constexpr int PIN_TRIG = D10;  // GPIO10
-constexpr int PIN_ECHO = D7;   // GPIO20; level-shift the HC-SR04 Echo signal to 3.3 V.
+constexpr int PIN_TRIG = D10; // GPIO10
+constexpr int PIN_ECHO = D7;  // GPIO20; level-shift the HC-SR04 Echo signal to 3.3 V.
 
-constexpr int MPU_SDA = D4;  // GPIO6
-constexpr int MPU_SCL = D5;  // GPIO7
-constexpr int MPU_INT = D6;  // GPIO21
+constexpr int MPU_SDA = D4; // GPIO6
+constexpr int MPU_SCL = D5; // GPIO7
+constexpr int MPU_INT = D6; // GPIO21
 constexpr uint8_t BALANCE_IMU_ADDRESS = 0x68;
 
 // Wi-Fi access point
 
 constexpr char AP_SSID[] = "XIAO-Robot";
-constexpr char AP_PASSWORD[] = "robotdrive";  // At least 8 characters.
+constexpr char AP_PASSWORD[] = "robotdrive"; // At least 8 characters.
+
+constexpr uint8_t AP_ADDRESS[] = {192, 168, 4, 1};
+constexpr uint8_t AP_SUBNET[] = {255, 255, 255, 0};
+constexpr uint8_t AP_CHANNEL = 1;
+constexpr bool AP_HIDDEN = false;
+constexpr uint8_t AP_MAX_CLIENTS = 1;
+constexpr uint16_t HTTP_PORT = 80;
+constexpr uint16_t WEBSOCKET_PORT = 81;
 
 // Driving
 
@@ -30,6 +38,10 @@ constexpr bool INVERT_RIGHT = true;
 
 // Forward/reverse use an S-ramp from this starting magnitude.
 // Turns and release/STOP change the driving request immediately.
+// Startup target speeds; saved per-wheel trims override these defaults.
+constexpr int DEFAULT_LEFT_PWM = 254;
+constexpr int DEFAULT_RIGHT_PWM = 254;
+
 constexpr int DRIVE_START_PWM = 100;
 constexpr uint32_t DRIVE_RAMP_MS = 1000;
 
@@ -41,6 +53,18 @@ constexpr float FORWARD_DISTANCE_CM = 20.0f;
 constexpr float REVERSE_DISTANCE_CM = 5.0f;
 constexpr uint32_t SENSOR_INTERVAL_MS = 80;
 constexpr uint32_t ECHO_TIMEOUT_US = 25000;
+
+// HC-SR04 measurement parameters, separate from the avoidance thresholds.
+constexpr uint32_t TRIGGER_LOW_US = 2;
+constexpr uint32_t TRIGGER_HIGH_US = 10;
+constexpr float SOUND_SPEED_CM_PER_US = 0.0343f;
+constexpr float SENSOR_MIN_CM = 2.0f;
+constexpr float SENSOR_MAX_CM = 400.0f;
+
+// A known physical reference point, independent of the avoidance thresholds.
+constexpr float DISTANCE_REFERENCE_CM = 20.0f;
+constexpr size_t DISTANCE_CALIBRATION_SAMPLES = 5;
+constexpr uint32_t DISTANCE_CALIBRATION_TIMEOUT_MS = 1200;
 
 // Attitude control
 
@@ -57,7 +81,7 @@ constexpr double MAX_DEAD_ZONE_DEG = 90.0;
 
 // Default PID gains; saved tuning overrides these values.
 constexpr double BALANCE_KP = 21.0;
-constexpr double BALANCE_KI = 0.0;  // Integral correction is disabled by default.
+constexpr double BALANCE_KI = 0.0; // Integral correction is disabled by default.
 constexpr double BALANCE_KD = 0.8;
 
 // Accepted ranges for wireless PID tuning.
@@ -92,27 +116,50 @@ constexpr uint32_t BALANCE_MAX_LOOP_GAP_MS = 50;
 constexpr uint32_t BALANCE_I2C_HZ = 400000;
 constexpr uint16_t BALANCE_I2C_TIMEOUT_MS = 5;
 
+// Consecutive readings required to enable, and maximum age of a fresh reading.
+constexpr unsigned BALANCE_REQUIRED_SAMPLES = 10;
+constexpr uint32_t BALANCE_FRESH_SAMPLE_MS = 30;
+constexpr uint32_t BALANCE_TASK_STACK_BYTES = 6144;
+constexpr unsigned BALANCE_TASK_PRIORITY = 3;
+
 // Watchdog for browser heartbeats, held commands and drive-request updates.
 constexpr uint32_t CONTROL_TIMEOUT_MS = 800;
 
+// Browser timing and maximum command size; also used to render the webpage.
+constexpr uint32_t HEARTBEAT_INTERVAL_MS = 150;
+constexpr uint32_t RECONNECT_INTERVAL_MS = 1500;
+constexpr uint32_t SETTINGS_CONFIRM_TIMEOUT_MS = 3000;
+constexpr uint32_t STATUS_INTERVAL_MS = 250;
+constexpr size_t MAX_COMMAND_BYTES = 64;
+
+// USB diagnostics; these do not set the drive or PID update rate.
+constexpr uint32_t SERIAL_BAUD_RATE = 115200;
+constexpr uint32_t SERIAL_CONNECT_TIMEOUT_MS = 2000;
+constexpr uint32_t SERIAL_CONNECT_POLL_MS = 10;
+constexpr uint32_t SERIAL_REPORT_INTERVAL_MS = 2000;
+constexpr size_t SERIAL_REPORT_MIN_SPACE = 160;
+constexpr uint32_t AP_FAILURE_POLL_MS = 100;
+
 // Compile-time validation
 
-static_assert(DRIVE_START_PWM >= 0 && DRIVE_START_PWM <= 255,
+static_assert(DRIVE_START_PWM >= 0 && DRIVE_START_PWM <= BALANCE_MAX_PWM,
               "Start PWM must be 0..255");
-static_assert(DRIVE_RAMP_MS > 0 && DRIVE_RAMP_MS <= 5000,
-              "Drive ramp must be 1..5000 ms");
-static_assert(REVERSE_DISTANCE_CM > 0 &&
-                  REVERSE_DISTANCE_CM < FORWARD_DISTANCE_CM,
+static_assert(DRIVE_RAMP_MS > 0 && DRIVE_RAMP_MS <= 5000, "Drive ramp must be 1..5000 ms");
+static_assert(REVERSE_DISTANCE_CM > 0 && REVERSE_DISTANCE_CM < FORWARD_DISTANCE_CM,
               "Reverse distance must be smaller than forward distance");
-static_assert(MOTOR_PWM_DEAD_ZONE >= 0 && MOTOR_PWM_DEAD_ZONE <= 255,
+static_assert(MOTOR_PWM_DEAD_ZONE >= 0 && MOTOR_PWM_DEAD_ZONE <= BALANCE_MAX_PWM,
               "Check PWM dead zone");
 static_assert(ATTITUDE_MAX_PWM > 0 && ATTITUDE_MAX_PWM <= BALANCE_MAX_PWM,
               "Check correction limit");
 static_assert(BALANCE_OUTPUT_SIGN == -1 || BALANCE_OUTPUT_SIGN == 1,
               "Balance sign must be -1 or 1");
-static_assert(BALANCE_MAX_PWM > 0 && BALANCE_MAX_PWM <= 255,
-              "Check balance limits");
-static_assert(BALANCE_PERIOD_MS > 0 &&
-                  BALANCE_PERIOD_MS < BALANCE_MAX_LOOP_GAP_MS &&
+static_assert(BALANCE_MAX_PWM > 0 && BALANCE_MAX_PWM <= 255, "Check balance limits");
+static_assert(BALANCE_PERIOD_MS > 0 && BALANCE_PERIOD_MS < BALANCE_MAX_LOOP_GAP_MS &&
                   BALANCE_MAX_LOOP_GAP_MS < BALANCE_IMU_TIMEOUT_MS,
               "Check balance timing");
+
+static_assert(DISTANCE_REFERENCE_CM >= SENSOR_MIN_CM && DISTANCE_REFERENCE_CM <= SENSOR_MAX_CM,
+              "Distance reference must be inside the sensor measurement range");
+static_assert(DISTANCE_CALIBRATION_SAMPLES > 0, "Distance calibration needs at least one sample");
+static_assert(DISTANCE_CALIBRATION_TIMEOUT_MS > DISTANCE_CALIBRATION_SAMPLES * SENSOR_INTERVAL_MS,
+              "Allow time to collect the reference readings");

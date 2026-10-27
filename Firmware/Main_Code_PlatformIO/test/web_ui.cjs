@@ -1,13 +1,11 @@
 // Run with Node.js: node test/web_ui.cjs
 // Executes the real embedded JavaScript against a small browser-event harness.
-const fs = require('node:fs');
-const path = require('node:path');
 const vm = require('node:vm');
 const assert = require('node:assert/strict');
-const header = fs.readFileSync(path.join(__dirname, '../include/web_page.h'), 'utf8');
-const html = header.split('R"HTML(')[1].split(')HTML"')[0];
+const {renderPage} = require('./render_page.cjs');
+const html = renderPage();
 const statusArea=html.match(/<section class="robot-status"[\s\S]*?<\/section>/)[0];
-assert(statusArea.includes('%ROBOT_SSID%') && statusArea.includes('id="angles"'));
+assert(statusArea.includes('XIAO-Robot') && statusArea.includes('id="angles"'));
 assert(!html.includes('Both modes start'),'remove the long movement explanation');
 assert(html.includes('min-height:104px'),'larger directional buttons');
 assert(!/<(?:script|link|img)\b[^>]*(?:src|href)=['"]https?:\/\//i.test(html), 'UI must not fetch external assets');
@@ -19,7 +17,7 @@ class Target {
   setPointerCapture() {}
   fire(name, values = {}) { for (const fn of this.events[name] || []) fn({preventDefault() {}, ...values}); }
 }
-const elements = Object.fromEntries(['forward','backward','left','right','manual','distanceMode','motorOff','stop','connection','activity','distance','modeLabel','angles','balanceInfo','calibrationMode','calibrationPanel','uprightValue','captureUpright','saveUpright','calibrationMessage','deadZone','applyDeadZone','saveDeadZone','deadZoneActive','deadZoneMessage','pidMode','pidPanel','drivePanel','pidP','pidI','pidD','applyPID','savePID','pidActive','pidMessage'].map(id => [id, new Target()]));
+const elements = Object.fromEntries(['distanceCalibrationPanel','pauseDistance','calibrateDistance','resumeDistance','distanceReferenceHint','distanceReferenceReading','distanceCalibrationMessage','forward','backward','left','right','manual','distanceMode','motorOff','stop','connection','activity','distance','modeLabel','angles','balanceInfo','calibrationMode','calibrationPanel','uprightValue','captureUpright','saveUpright','calibrationMessage','deadZone','applyDeadZone','saveDeadZone','deadZoneActive','deadZoneMessage','pidMode','pidPanel','drivePanel','pidP','pidI','pidD','applyPID','savePID','pidActive','pidMessage'].map(id => [id, new Target()]));
 const commands = {forward:'forward',backward:'backward',left:'turnLeft',right:'turnRight'};
 const buttons = Object.keys(commands).map(id => { elements[id].dataset.command = commands[id]; return elements[id]; });
 const document = new Target(), window = new Target();
@@ -69,6 +67,19 @@ document.fire('keyup',{key:'w',code:'KeyW'}); assert.equal(last(),'stop');
 pointer(elements.backward,'pointerdown'); window.fire('blur'); assert.equal(last(),'stop');
 elements.distanceMode.fire('click'); assert.equal(last(),'mode:distance');
 state('DISTANCE'); assert.equal(elements.forward.disabled,true);assert.match(elements.modeLabel.textContent,/No echo keeps moving/);
+assert.equal(elements.distanceCalibrationPanel.hidden,false);
+assert.match(elements.calibrateDistance.textContent,/20 cm/);
+assert.equal(elements.calibrateDistance.disabled,true);
+elements.pauseDistance.fire('click');assert.equal(last(),'distance:pause');
+socket.onmessage({data:JSON.stringify({mode:'DISTANCE',distance_cm:32,distance_paused:true})});
+assert.equal(elements.calibrateDistance.disabled,false);assert.equal(elements.pauseDistance.disabled,true);
+elements.calibrateDistance.fire('click');assert.equal(last(),'distance:calibrate');
+socket.onmessage({data:JSON.stringify({mode:'DISTANCE',distance_cm:20,distance_raw_cm:32,distance_offset_cm:-12,distance_calibrating:true,distance_paused:true,distance_calibration_message:'Measuring reference'})});
+assert.equal(elements.calibrateDistance.disabled,true);assert.equal(elements.resumeDistance.disabled,true);assert.match(elements.modeLabel.textContent,/paused/);
+const beforeDuplicate=socket.sent.length;elements.calibrateDistance.fire('click');assert.equal(socket.sent.length,beforeDuplicate);
+socket.onmessage({data:JSON.stringify({mode:'DISTANCE',distance_cm:20,distance_raw_cm:32,distance_offset_cm:-12,distance_calibrating:false,distance_paused:true,distance_calibration_message:'Reference saved'})});
+assert.equal(elements.calibrateDistance.disabled,false);assert.match(elements.distanceReferenceReading.textContent,/32.0 cm.*-12.0 cm/);assert.match(elements.distanceCalibrationMessage.textContent,/saved/);
+elements.resumeDistance.fire('click');assert.equal(last(),'mode:distance');state('DISTANCE');
 const count = socket.sent.length;
 document.fire('keydown',{key:'ArrowUp',code:'ArrowUp',repeat:false});
 assert.equal(socket.sent.length,count,'keyboard must not drive in distance mode');
@@ -166,3 +177,7 @@ assert.equal(elements.applyPID.disabled,true);assert.equal(elements.savePID.disa
 assert.equal(elements.saveUpright.disabled,true);assert.equal(elements.captureUpright.disabled,true);
 module.exports = 'PASS: wireless PID apply/save, edit isolation and held-input cancellation; two-mode controls, motor-off, held commands, release, keyboard, focus, reconnect, and offline assets';
 if (require.main === module) console.log(module.exports);
+
+const customized = renderPage({PID_MAX_KP:31,MIN_UPRIGHT_DEG:100,MAX_DEAD_ZONE_DEG:12,WEBSOCKET_PORT:82,HEARTBEAT_INTERVAL_MS:175,DISTANCE_REFERENCE_CM:25});
+assert(customized.includes('max="31.000"') && customized.includes('min="100.000"') && customized.includes('max="12.000"'));
+assert(customized.includes('wsPort:82') && customized.includes('heartbeatMS:175') && customized.includes('distanceReferenceCM:25.000'));
