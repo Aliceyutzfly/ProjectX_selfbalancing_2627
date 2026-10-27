@@ -5,19 +5,17 @@ Verified 27 October 2026 with Arduino CLI and Espressif Arduino ESP32 core 3.3.5
 - Board: XIAO_ESP32C3. USB CDC On Boot: Enabled.
 - FQBN: `esp32:esp32:XIAO_ESP32C3:CDCOnBoot=default`.
 - Application tabs: `Robot_ArduinoIDE.ino` and `Balance.ino`.
-- Compile/link: PASS. Flash: **1,078,918 / 1,310,720 bytes (82%)**.
-- Global RAM: **38,404 / 327,680 bytes (11%)**.
-- Bundled libraries compile from `src/lib`; no separate library installs required.
-- No application `.cpp` files. Nothing uploaded or hardware-tested.
+- Compile/link: PASS. Flash: **1,084,714 / 1,310,720 bytes (82%)**.
+- Global RAM: **38,476 / 327,680 bytes (11%)**.
+- Bundled third-party libraries compile from `src/lib`.
+- Nothing uploaded or hardware-tested.
 
-## Configuration cleanup checks
+## Distance reference calibration verification
 
-All 45 original configuration values are unchanged. Editable defaults and connection/timing parameters are centralized in `robot_config.h`; repeated wheel clamps reuse `BALANCE_MAX_PWM`. The output dead zone remains 150 and the default angle dead zone remains +/-2 degrees. Math expressions and chip-format checks remain beside their algorithms.
+Tests execute the actual calibration, sampling, movement-decision and cancellation functions with mocked Echo timing, motor output and Preferences storage. Verified: capture accepts only distance mode; motors stop; cached/no-Echo readings never count; five fresh samples use a median; raw 32 cm maps to corrected 20 cm; the saved offset reloads after a simulated restart; corrected readings feed the forward/left/reverse rules; corrected negative values become zero; invalid Echo retains its previous handling.
 
-43 existing function definitions match the previous control/validation logic after expanding the named constants and normalizing the three revised validation messages. Setup and diagnostic reporting were checked separately through native compilation and page/configuration checks. The control task, motor pipeline, timeout/fault checks, saved Preferences keys and runtime calibration remain.
+Also verified duplicate capture commands do not restart a pending measurement, timeout and storage failures retain the previous correction and keep avoidance paused, invalid stored offsets fall back to uncalibrated readings, and STOP/emergency stop/mode changes/control timeout cancel capture. Pause does not capture or save; Resume avoidance is explicit.
 
-The function-reference audit found no unused application functions, including callbacks. Redundant explicit prototype blocks were removed; Arduino's generated prototypes compile successfully. The application now has 47 referenced functions, including the new URL and page-rendering helpers.
+Rendered-page tests pass with default and customized header values. They cover pause/capture/resume, pending-button disabling, raw/corrected readouts and messages, and existing driving/settings/reconnect behaviour. Page placeholders all resolve from the configuration header.
 
-The rendered-page regression tests pass with default and customized header values: direction controls, mode selection, PID/dead-zone Apply/Save/acknowledgements, validation, keyboard input, reconnect and offline assets. HTML limits and JavaScript parameters are generated from the same configuration header. This checks software behaviour, not physical robot dynamics.
-
-Verification uses the isolated workspace board-core configuration; the shared Arduino installation was not modified. Arduino-specific configuration cleanup is now maintained independently of the PlatformIO source layout.
+Existing PWM output dead zone 150, angle dead zone, PID control, saved settings and wiring remain. Calibration is an additive single-point distance correction; physical accuracy and robot dynamics require hardware testing. The build uses the isolated workspace board configuration without changing the shared Arduino installation.

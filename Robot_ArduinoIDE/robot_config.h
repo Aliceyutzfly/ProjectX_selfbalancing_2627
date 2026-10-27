@@ -61,6 +61,11 @@ constexpr float SOUND_SPEED_CM_PER_US = 0.0343f;
 constexpr float SENSOR_MIN_CM = 2.0f;
 constexpr float SENSOR_MAX_CM = 400.0f;
 
+// A known physical reference point, independent of the avoidance thresholds.
+constexpr float DISTANCE_REFERENCE_CM = 20.0f;
+constexpr size_t DISTANCE_CALIBRATION_SAMPLES = 5;
+constexpr uint32_t DISTANCE_CALIBRATION_TIMEOUT_MS = 1200;
+
 // Attitude control
 
 // Angles use pitch + 180 degrees. Saved calibration overrides the default.
@@ -152,3 +157,9 @@ static_assert(BALANCE_MAX_PWM > 0 && BALANCE_MAX_PWM <= 255, "Check balance limi
 static_assert(BALANCE_PERIOD_MS > 0 && BALANCE_PERIOD_MS < BALANCE_MAX_LOOP_GAP_MS &&
                   BALANCE_MAX_LOOP_GAP_MS < BALANCE_IMU_TIMEOUT_MS,
               "Check balance timing");
+
+static_assert(DISTANCE_REFERENCE_CM >= SENSOR_MIN_CM && DISTANCE_REFERENCE_CM <= SENSOR_MAX_CM,
+              "Distance reference must be inside the sensor measurement range");
+static_assert(DISTANCE_CALIBRATION_SAMPLES > 0, "Distance calibration needs at least one sample");
+static_assert(DISTANCE_CALIBRATION_TIMEOUT_MS > DISTANCE_CALIBRATION_SAMPLES * SENSOR_INTERVAL_MS,
+              "Allow time to collect the reference readings");

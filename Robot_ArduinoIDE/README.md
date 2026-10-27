@@ -40,3 +40,16 @@ Edit `robot_config.h`, then compile and upload. Do not change the `.ino` globals
 The browser form ranges and timing follow the header automatically. Saved wheel trims, upright target, PID gains and angle dead zone still override their startup defaults; updating those defaults does not erase saved calibration. The PWM output dead zone is a compile-time setting and is separate from the saved angle dead zone.
 
 The configuration organization is maintained directly in this Arduino folder. Preserve it when syncing later changes from PlatformIO; the headers and rendering setup now deliberately differ while using the same control behaviour.
+
+## Set the ultrasonic 20 cm reference
+
+1. Select **Avoid obstacles**, then press **Pause to position robot**. All motor output, including attitude correction, stops.
+2. Place the ultrasonic sensor **20 cm from a flat wall/object**.
+3. Press **Set current reading as 20 cm** and keep it still until the page confirms the reference was saved.
+4. Press **Resume avoidance** to move again. Avoidance uses the corrected distance.
+
+Calibration takes the median of five new valid Echo measurements and saves an additive correction in Preferences namespace `distanceCalib`, key `offset`. For example, a raw reference reading of 32 cm produces a -12 cm correction, so that point reads 20 cm. Corrected distances are clamped at zero; no Echo stays invalid and retains the existing no-Echo movement rule after resuming. Raw distance and the saved correction are shown in the calibration panel.
+
+The reference survives restarts and ordinary uploads. Recalibrate at the same known physical distance to replace it. Missing Echo times out after 1200 ms; storage failures retain the previous correction. Both outcomes leave avoidance paused. STOP, emergency stop, mode changes or loss of control cancel an unfinished capture. Calibration never resumes motion by itself.
+
+The reference distance, sample count and timeout are configurable in `robot_config.h` as `DISTANCE_REFERENCE_CM`, `DISTANCE_CALIBRATION_SAMPLES` and `DISTANCE_CALIBRATION_TIMEOUT_MS`. The physical reference distance is independent of the forward/reverse decision thresholds.

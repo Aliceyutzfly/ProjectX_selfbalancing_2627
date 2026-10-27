@@ -21,6 +21,7 @@ Mode currentMode = REMOTE_MODE;
 Preferences prefs;
 Preferences imuPrefs;
 Preferences pidPrefs;
+Preferences distancePrefs;
 WebServer httpServer(HTTP_PORT);
 WebSocketsServer wsServer(WEBSOCKET_PORT);
 
@@ -46,6 +47,16 @@ int controller = -1;
 uint32_t lastHeartbeat = 0, lastDrive = 0, lastSensor = 0, lastStatus = 0;
 float distanceCM = -1;
 bool distanceValid = false;
+float rawDistanceCM = -1;
+bool rawDistanceValid = false;
+float distanceOffsetCM = 0;
+bool distanceStorageReady = false;
+bool distancePaused = false;
+bool distanceCalibrating = false;
+float distanceReferenceSamples[DISTANCE_CALIBRATION_SAMPLES];
+size_t distanceReferenceCount = 0;
+uint32_t distanceCalibrationStarted = 0;
+const char* distanceCalibrationMessage = "No distance reference saved yet";
 
 // Stored settings and browser feedback
 
@@ -103,6 +114,15 @@ void moveMotor(int left, int right) {
 
 // Movement requests and acceleration
 
+// A stop or mode change cancels a pending capture before it can save anything.
+void cancelDistanceCalibration() {
+  if (distanceCalibrating)
+    distanceCalibrationMessage = "Reference capture cancelled - previous correction retained";
+  distanceCalibrating = false;
+  distanceReferenceCount = 0;
+  distancePaused = false;
+}
+
 // Cancel both the current request and any unfinished ramp.
 void clearDriveRequest() {
   rampActive = false;
@@ -114,6 +134,7 @@ void clearDriveRequest() {
 
 // Immediate shutdown: faults, connection loss and emergency stop.
 void stopMotors() {
+  cancelDistanceCalibration();
   clearDriveRequest();
   balanceDisarm();
   armPending = false;
@@ -229,6 +250,7 @@ bool drive(const String& command) {
 // STOP exits distance mode and zeros base drive. Attitude correction stays active;
 // settings pages remain disabled.
 void requestUserStop() {
+  cancelDistanceCalibration();
   if (isSettingsMode()) {
     stopMotors();
     return;
@@ -251,13 +273,21 @@ void sampleDistance(uint32_t now) {
   digitalWrite(PIN_TRIG, LOW);
   const uint32_t duration = pulseInLong(PIN_ECHO, HIGH, ECHO_TIMEOUT_US);
   // Echo pulse duration is the sound round-trip time.
-  distanceCM = duration * SOUND_SPEED_CM_PER_US / 2.0f;
-  distanceValid = duration != 0 && distanceCM >= SENSOR_MIN_CM && distanceCM <= SENSOR_MAX_CM;
+  rawDistanceCM = duration * SOUND_SPEED_CM_PER_US / 2.0f;
+  rawDistanceValid =
+      duration != 0 && rawDistanceCM >= SENSOR_MIN_CM && rawDistanceCM <= SENSOR_MAX_CM;
+  // Validate the actual Echo before applying the reference correction. No Echo
+  // stays invalid; short corrected readings still trigger the reverse rule.
+  distanceValid = rawDistanceValid;
+  distanceCM = distanceValid ? max(0.0f, rawDistanceCM + distanceOffsetCM) : -1;
+  updateDistanceCalibration(millis(), true);
 }
 
 // Apply the distance thresholds from robot_config.h.
 // No echo preserves the last request, or starts forward if stopped.
 void handleDistanceMode() {
+  if (distancePaused)
+    return;
   if (!distanceValid) {
     // Do not restart an existing ramp or replace the last distance decision.
     if (requestedMotion == STOPPED)
@@ -270,6 +300,77 @@ void handleDistanceMode() {
     requestMotion(BACKWARD);
   else
     requestMotion(TURN_LEFT);
+}
+
+// Saved correction is an additive offset: corrected = raw + offset.
+void loadDistanceCalibration() {
+  distanceStorageReady = distancePrefs.begin("distanceCalib", false);
+  const float saved = distanceStorageReady ? distancePrefs.getFloat("offset", 0.0f) : 0.0f;
+  if (isfinite(saved) && saved >= DISTANCE_REFERENCE_CM - SENSOR_MAX_CM &&
+      saved <= DISTANCE_REFERENCE_CM - SENSOR_MIN_CM) {
+    distanceOffsetCM = saved;
+    if (distanceStorageReady && distancePrefs.isKey("offset"))
+      distanceCalibrationMessage = "Saved distance reference loaded";
+  } else {
+    distanceOffsetCM = 0;
+    distanceCalibrationMessage = "Invalid saved reference - using uncalibrated readings";
+  }
+  if (!distanceStorageReady)
+    distanceCalibrationMessage = "Distance calibration storage unavailable";
+}
+
+void startDistanceCalibration() {
+  if (currentMode != DISTANCE_MODE || distanceCalibrating)
+    return;
+  stopMotors();
+  distancePaused = true;
+  activity = "Distance calibration - motors off";
+  if (!distanceStorageReady) {
+    distanceCalibrationMessage = "Cannot save reference - storage unavailable";
+    return;
+  }
+  distanceCalibrating = true;
+  distanceCalibrationStarted = millis();
+  lastSensor = millis() - SENSOR_INTERVAL_MS; // Require new readings, never cached status.
+  distanceCalibrationMessage = "Measuring reference - keep the robot still";
+}
+
+// Collect distinct sensor samples without blocking the network loop. A median
+// reduces single-reading outliers. Remain paused after success or failure.
+void updateDistanceCalibration(uint32_t now, bool freshReading) {
+  if (!distanceCalibrating)
+    return;
+  if (now - distanceCalibrationStarted >= DISTANCE_CALIBRATION_TIMEOUT_MS) {
+    distanceCalibrating = false;
+    distanceCalibrationMessage = "No reliable Echo - reference unchanged; retry or resume";
+    activity = "Distance paused";
+    return;
+  }
+  if (!freshReading || !rawDistanceValid)
+    return;
+  distanceReferenceSamples[distanceReferenceCount++] = rawDistanceCM;
+  if (distanceReferenceCount < DISTANCE_CALIBRATION_SAMPLES)
+    return;
+  for (size_t i = 1; i < DISTANCE_CALIBRATION_SAMPLES; ++i) {
+    const float sample = distanceReferenceSamples[i];
+    size_t j = i;
+    while (j > 0 && distanceReferenceSamples[j - 1] > sample) {
+      distanceReferenceSamples[j] = distanceReferenceSamples[j - 1];
+      --j;
+    }
+    distanceReferenceSamples[j] = sample;
+  }
+  const float reference = distanceReferenceSamples[DISTANCE_CALIBRATION_SAMPLES / 2];
+  const float offset = DISTANCE_REFERENCE_CM - reference;
+  distanceCalibrating = false;
+  activity = "Distance paused";
+  if (distancePrefs.putFloat("offset", offset) != sizeof(float)) {
+    distanceCalibrationMessage = "Reference save failed - previous correction retained";
+    return;
+  }
+  distanceOffsetCM = offset;
+  distanceCM = max(0.0f, rawDistanceCM + distanceOffsetCM);
+  distanceCalibrationMessage = "Reference saved - select Resume avoidance to move";
 }
 
 // Control timeouts
@@ -493,6 +594,11 @@ String statusJSON() {
   };
   add("mode", text(modeName()));
   add("distance_cm", distanceValid ? String(distanceCM, 1) : "null");
+  add("distance_raw_cm", rawDistanceValid ? String(rawDistanceCM, 1) : "null");
+  add("distance_offset_cm", String(distanceOffsetCM, 3));
+  add("distance_calibrating", distanceCalibrating ? "true" : "false");
+  add("distance_paused", distancePaused ? "true" : "false");
+  add("distance_calibration_message", text(distanceCalibrationMessage));
   add("activity", text(activity));
   add("balance_active", state.armed ? "true" : "false");
   add("balance_ready", state.ready ? "true" : "false");
@@ -536,6 +642,15 @@ void handleCommand(const String& command) {
     requestUserStop();
   else if (command == "heartbeat")
     lastHeartbeat = millis();
+  else if (command == "distance:pause") {
+    if (currentMode == DISTANCE_MODE) {
+      stopMotors();
+      distancePaused = true;
+      activity = "Distance paused";
+      distanceCalibrationMessage = "Position the robot at the reference point, then set it";
+    }
+  } else if (command == "distance:calibrate")
+    startDistanceCalibration();
   else if (command == "motors:off")
     stopAndManual();
   else if (command == "mode:calibration")
@@ -638,6 +753,7 @@ void setup() {
   rightPWM = constrain(prefs.getInt("rightPWM", rightPWM), 0, BALANCE_MAX_PWM);
   Serial.printf("PWM: L=%d R=%d. L/l and R/r adjust; S saves.\n", leftPWM, rightPWM);
 
+  loadDistanceCalibration();
   loadUprightCalibration();
   loadPIDSettings(); // Defaults or saved tuning, before the single output task starts.
 
@@ -681,6 +797,8 @@ void loop() {
   wsServer.loop();
   checkControlTimeouts(millis());
   sampleDistance(millis()); // The independent motor task continues during Echo waits.
+  updateDistanceCalibration(millis(),
+                            false); // Enforce calibration timeout even without a new Echo.
   checkControlTimeouts(millis());
   if (currentMode == DISTANCE_MODE)
     handleDistanceMode();
