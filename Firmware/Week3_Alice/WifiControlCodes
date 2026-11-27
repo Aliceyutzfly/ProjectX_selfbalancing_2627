@@ -1,0 +1,118 @@
+// Week 3: motor + Wi-Fi AP + browser control (no PID)
+// The motor output follows the final ProjectX moveMotor() logic.
+#include <Arduino.h>
+#include <WiFi.h>
+#include <WebServer.h>
+
+constexpr int MOTOR_IN1 = D0; // AIN1
+constexpr int MOTOR_IN2 = D1; // AIN2
+constexpr int MOTOR_IN3 = D2; // BIN1
+constexpr int MOTOR_IN4 = D3; // BIN2
+constexpr bool INVERT_LEFT = true, INVERT_RIGHT = true;
+constexpr char AP_SSID[] = "XIAO-Robot";
+constexpr char AP_PASSWORD[] = "robotdrive";
+constexpr int DRIVE_PWM = 160;
+constexpr unsigned long CONTROL_TIMEOUT_MS = 500;
+WebServer httpServer(80);
+unsigned long lastCommandMs = 0;
+bool driving = false;
+
+void moveMotor(int left, int right) {
+  left = constrain(left, -255, 255);
+  right = constrain(right, -255, 255);
+  if (INVERT_LEFT) left = -left;
+  if (INVERT_RIGHT) right = -right;
+  if (left >= 0) {
+    analogWrite(MOTOR_IN2, 0); analogWrite(MOTOR_IN1, left);
+  } else {
+    analogWrite(MOTOR_IN1, 0); analogWrite(MOTOR_IN2, -left);
+  }
+  if (right >= 0) {
+    analogWrite(MOTOR_IN4, 0); analogWrite(MOTOR_IN3, right);
+  } else {
+    analogWrite(MOTOR_IN3, 0); analogWrite(MOTOR_IN4, -right);
+  }
+}
+
+const char WEBPAGE[] PROGMEM = R"HTML(
+
+<!doctype html><html><head>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+body { font-family:Arial; text-align:center; margin:30px; }
+button { font-size:24px; width:110px; height:65px;
+         margin:5px; touch-action:none; }
+</style></head><body>
+<h2>ProjectX remote control</h2>
+<p>Hold to drive; release to stop.</p>
+<div><button data-d="F">Forward</button></div>
+<div><button data-d="L">Left</button>
+<button data-d="S">Stop</button>
+<button data-d="R">Right</button></div>
+<div><button data-d="B">Reverse</button></div>
+<script>
+let timer = null;
+
+function send(d) {
+  fetch('/cmd?d=' + d, {cache:'no-store'}).catch(()=>{});
+}
+function stop() {
+  clearInterval(timer); timer = null; send('S');
+}
+document.querySelectorAll('button').forEach(b => {
+  b.addEventListener('pointerdown', e => {
+    e.preventDefault(); stop();
+    const d = b.dataset.d;
+    if (d === 'S') return;
+    send(d); timer = setInterval(()=>send(d),150);
+  });
+  b.addEventListener('pointerup', stop);
+  b.addEventListener('pointercancel', stop);
+  b.addEventListener('pointerleave', stop);
+
+});
+window.addEventListener('blur', stop);
+</script></body></html>
+)HTML";
+
+void handleCommand() {
+  String d = httpServer.arg("d");
+  if      (d == "F") moveMotor( DRIVE_PWM,  DRIVE_PWM);
+  else if (d == "B") moveMotor(-DRIVE_PWM, -DRIVE_PWM);
+  else if (d == "L") moveMotor(-DRIVE_PWM,  DRIVE_PWM);
+  else if (d == "R") moveMotor( DRIVE_PWM, -DRIVE_PWM);
+  else {
+    moveMotor(0, 0); driving = false;
+    httpServer.send(200, "text/plain", "stopped"); return;
+  }
+
+  lastCommandMs = millis(); driving = true;
+  httpServer.send(200, "text/plain", "ok");
+}
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(MOTOR_IN1, OUTPUT); pinMode(MOTOR_IN2, OUTPUT);
+  pinMode(MOTOR_IN3, OUTPUT); pinMode(MOTOR_IN4, OUTPUT);
+  moveMotor(0, 0);
+  WiFi.mode(WIFI_AP);
+  if (!WiFi.softAP(AP_SSID, AP_PASSWORD)) {
+    Serial.println("Access Point failed"); return;
+  }
+  Serial.println(WiFi.softAPIP()); // usually 192.168.4.1
+  httpServer.on("/", [](){
+
+    httpServer.send_P(200, "text/html", WEBPAGE);
+  });
+  httpServer.on("/cmd", handleCommand);
+  httpServer.begin();
+}
+
+void loop() {
+  httpServer.handleClient();
+  if (driving && millis() - lastCommandMs > CONTROL_TIMEOUT_MS) {
+    moveMotor(0, 0); driving = false; // lost command -> stop
+  }
+}
+
+
